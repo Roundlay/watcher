@@ -1,0 +1,14 @@
+*
+!/**/
+!*.*
+
+*.exe
+*.pdb
+*.raddbgi
+*.obj
+*.sln
+
+.env
+
+bin/
+/screen.odin # Temp
