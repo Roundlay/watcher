@@ -28,6 +28,7 @@ import "core:sys/windows"
 import "core:runtime"
 import "core:io"
 import "core:bufio"
+import "core:path/filepath"
 
 // TODO: Maybe try messing around with PeekNamedPipe to see if we can get
 // the output of the process without blocking? Any benefit?
@@ -185,22 +186,33 @@ main :: proc() {
     if io_completion_port_handle == windows.INVALID_HANDLE_VALUE do return
     defer windows.CloseHandle(io_completion_port_handle)
 
-    // We need to make sure we pass the full file path to the Odin compiler,
-    // otherwise the program will always look for files of the same name in the
-    // root directory.
+    // Make sure to pass the full file path to the Odin compiler, otherwise the
+    // watcher will always look for events in the same directory as the watcher
+    // executable.
+    // ** TODO: Make sure the target directory is passed to the filename builder.
+    // TODO: Make sure the target directory exists before trying to watch it.
 
-    target_directory : windows.wstring 
+    watched_directory : windows.wstring 
 
     if len(os.args) > 1 {
-        target_directory = windows.utf8_to_wstring(os.args[1])
+        temp_watched_directory := os.args[1]
+        file_info, file_info_error := os.lstat(temp_watched_directory)
+        if file_info_error != 0 {
+            fmt.println("ERROR: Invalid directory: {}", temp_watched_directory)
+            return
+        } else if !os.is_dir(file_info.fullpath) {
+            fmt.println("ERROR: Not a directory: {}", temp_watched_directory)
+            return
+        }
+        watched_directory = windows.utf8_to_wstring(os.args[1])
+        fmt.printf("INFO: Watching directory: {}\n", os.args[1])
     } else {
-        target_directory = windows.utf8_to_wstring(os.get_current_directory())
+        watched_directory = windows.utf8_to_wstring(os.get_current_directory())
     }
 
-    target_directory_handle : windows.HANDLE = windows.CreateFileW(target_directory, windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OVERLAPPED, nil)
-
-    if target_directory_handle == windows.INVALID_HANDLE_VALUE {
-        fmt.eprintf("ERROR: `target_directory_handle` is invalid: {}", windows.GetLastError())
+    watched_directory_handle : windows.HANDLE = windows.CreateFileW(watched_directory, windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OVERLAPPED, nil)
+    if watched_directory_handle == windows.INVALID_HANDLE_VALUE {
+        fmt.eprintf("ERROR: Handle to target directory is invalid: {}", windows.GetLastError())
         return
     }
 
@@ -212,7 +224,7 @@ main :: proc() {
     // for Windows?
 
     ids := make([dynamic][3]any)
-    id  := [3]any{overlapped, target_directory_handle, target_directory}
+    id  := [3]any{overlapped, watched_directory_handle, watched_directory}
     append(&ids, id)
 
     defer {
@@ -223,8 +235,8 @@ main :: proc() {
         delete(ids)
     }
 
-    if windows.CreateIoCompletionPort(target_directory_handle, io_completion_port_handle, cast(^uintptr)(&id), 1) == windows.INVALID_HANDLE_VALUE {
-        fmt.eprintf("`windows.CreateIoCompletionPort` has an invalid target_directory_handle value: {}", windows.GetLastError())
+    if windows.CreateIoCompletionPort(watched_directory_handle, io_completion_port_handle, cast(^uintptr)(&id), 1) == windows.INVALID_HANDLE_VALUE {
+        fmt.eprintf("`windows.CreateIoCompletionPort` has an invalid watched_directory_handle value: {}", windows.GetLastError())
         return
     }
 
@@ -232,7 +244,7 @@ main :: proc() {
     buffer := make([]byte, 16 * 1024)
     defer delete(buffer)
 
-    if windows.ReadDirectoryChangesW(target_directory_handle, &buffer[0], u32(len(buffer)), true, windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE, nil, overlapped, nil) == windows.BOOL(false) {
+    if windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE, nil, overlapped, nil) == windows.BOOL(false) {
         fmt.eprintf("`windows.ReadDirectoryChangesW` returned false or failed. Last error: {}", windows.GetLastError())
         return
     }
@@ -280,9 +292,9 @@ main :: proc() {
 
         // TODO - Make sure this is cleaning everything up properly; we may not need to do this manually.
         if should_terminate {
-            if target_directory_handle != windows.INVALID_HANDLE_VALUE {
-                windows.CloseHandle(target_directory_handle)
-                target_directory_handle = windows.INVALID_HANDLE_VALUE
+            if watched_directory_handle != windows.INVALID_HANDLE_VALUE {
+                windows.CloseHandle(watched_directory_handle)
+                watched_directory_handle = windows.INVALID_HANDLE_VALUE
             }
 
             if io_completion_port_handle != windows.INVALID_HANDLE_VALUE {
@@ -489,7 +501,7 @@ main :: proc() {
 
             filepath_buffer : [512]u16
             filepath_buffer_length : u32 = 512
-            filepath_length : windows.DWORD = windows.GetFinalPathNameByHandleW(target_directory_handle, &filepath_buffer[0], filepath_buffer_length, 0)
+            filepath_length : windows.DWORD = windows.GetFinalPathNameByHandleW(watched_directory_handle, &filepath_buffer[0], filepath_buffer_length, 0)
             filepath, filepath_error := windows.wstring_to_utf8(&filepath_buffer[0], -1)
 
             if strings.has_prefix(filepath, "\\\\?\\") {
@@ -709,7 +721,7 @@ main :: proc() {
         }
 
         FSW_WATCHING_EVENTS : windows.DWORD : windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE
-        if !windows.ReadDirectoryChangesW(target_directory_handle, &buffer[0], u32(len(buffer)), true, FSW_WATCHING_EVENTS, nil, overlapped, nil) {
+        if !windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, FSW_WATCHING_EVENTS, nil, overlapped, nil) {
             fmt.eprintf("ReadDirectoryChangesW failed! \n")
         }
     }
