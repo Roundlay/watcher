@@ -53,7 +53,9 @@ ANSICLEAR :: "\x1b[2J"
 ANSIHOME  :: "\x1b[H"
 
 BLOCKING    :: windows.INFINITE
-NONBLOCKING :: windows.DWORD(0)
+NON_BLOCKING :: windows.DWORD(0)
+PROCESS_COMPLETED :: windows.WAIT_OBJECT_0
+PROCESS_RUNNING   :: windows.WAIT_TIMEOUT
 
 // This works, as far as I can tell, but I don't know how to verify that
 // everything is getting cleaned up yet.
@@ -195,13 +197,13 @@ main :: proc() {
     watched_directory : windows.wstring 
 
     if len(os.args) > 1 {
-        temp_watched_directory := os.args[1]
-        file_info, file_info_error := os.lstat(temp_watched_directory)
+        command_line_argument := os.args[1]
+        file_info, file_info_error := os.lstat(command_line_argument)
         if file_info_error != 0 {
-            fmt.println("ERROR: Invalid directory: {}", temp_watched_directory)
+            fmt.println("ERROR: Invalid directory: {}", command_line_argument)
             return
         } else if !os.is_dir(file_info.fullpath) {
-            fmt.println("ERROR: Not a directory: {}", temp_watched_directory)
+            fmt.println("ERROR: Not a directory: {}", command_line_argument)
             return
         }
         watched_directory = windows.utf8_to_wstring(os.args[1])
@@ -343,7 +345,7 @@ main :: proc() {
             }
 
             status_of_running_process := windows.WaitForSingleObject(metadata.running_process, 0)
-            if status_of_running_process == windows.WAIT_OBJECT_0 { // Process has finished
+            if status_of_running_process == PROCESS_COMPLETED{ // Process has finished
                 if windows.GetExitCodeProcess(metadata.running_process, &metadata.exit_code) {
                     if metadata.exit_code == 0 {
                         fmt.printf("\n")
@@ -414,10 +416,10 @@ main :: proc() {
 
         number_of_bytes_transferred := windows.DWORD(0)
 
-        if windows.GetQueuedCompletionStatus(io_completion_port_handle, &number_of_bytes_transferred, cast(uintptr)(&id), &overlapped, NONBLOCKING) == windows.BOOL(false) {
+        if windows.GetQueuedCompletionStatus(io_completion_port_handle, &number_of_bytes_transferred, cast(uintptr)(&id), &overlapped, NON_BLOCKING) == windows.BOOL(false) {
             last_error := windows.GetLastError()
             switch last_error {
-                case windows.WAIT_TIMEOUT:
+                case PROCESS_RUNNING:
                     continue
                 case windows.ERROR_OPERATION_ABORTED:
                     continue
@@ -553,128 +555,95 @@ main :: proc() {
             strings.builder_reset(&command_builder)
 
             // COMPILE STEP
-            fmt.printf("[1] Starting compile step.\n")
 
             if !compiled {
-                fmt.printf("[2] Compilation not done yet. Starting pipe creation.\n")
-
                 if windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &metadata.security_attributes, 0) {
-                    fmt.printf("[3] Pipe creation successful. Error read handle: {}, Error write handle: {}\n", metadata.error_read_handle, metadata.error_write_handle)
                     metadata.startup_information.hStdError = metadata.error_write_handle
                 } else {
-                    fmt.eprintf("[4] Failed to create standard error handles for the compilation process. Last error: {}\n", windows.GetLastError())
                 }
 
                 timer = time.tick_now()
-                fmt.printf("[5] Starting process creation with command: {}\n", compilation_command)
                 if !windows.CreateProcessW(nil, compilation_command, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
-                    fmt.eprintf("[6] Failed to create process during compilation step: {}\n", windows.GetLastError())
-
                     if metadata.error_write_handle != windows.INVALID_HANDLE_VALUE {
-                        fmt.printf("[7] Closing error write handle due to process creation failure.\n")
                         windows.CloseHandle(metadata.error_write_handle)
                     }
                     if metadata.error_read_handle != windows.INVALID_HANDLE_VALUE {
-                        fmt.printf("[8] Closing error read handle due to process creation failure.\n")
                         windows.CloseHandle(metadata.error_read_handle)
                     }
-
                     metadata.running_process = nil
                     fmt.printf("[9] Exiting compile step due to process creation failure.\n")
-                    return
+                    // return
+                    break
                 }
 
-                fmt.printf("[10] Process creation successful. Process handle: {}, Thread handle: {}\n", metadata.process_information.hProcess, metadata.process_information.hThread)
                 windows.CloseHandle(metadata.process_information.hThread)
                 metadata.process_information.hThread = nil
                 metadata.running_process = metadata.process_information.hProcess
 
-                // Initialize variables for non-blocking read
                 bytes_read: windows.DWORD
-                total_bytes_avail: windows.DWORD
+                total_bytes_available: windows.DWORD
                 bytes_left_this_message: windows.DWORD
-                compilation_output_buffer := make([]u8, 1024) // Smaller buffer size for quicker reads
+                compilation_output_buffer := make([]u8, 2048) // Smaller buffer size for quicker reads
 
-                // Read in a loop while waiting for the process to finish
-                fmt.printf("[11] Starting loop to read error output and wait for process completion.\n")
-                for {
-                    // Non-blocking wait with a short timeout
-                    status_of_compilation_process := windows.WaitForSingleObject(metadata.running_process, 100) // 100ms timeout
-                    if status_of_compilation_process == windows.WAIT_OBJECT_0 {
-                        fmt.printf("[12] Compilation process completed. Retrieving exit code.\n")
-                        break
-                    } else if status_of_compilation_process == windows.WAIT_TIMEOUT {
-                        // Continue to read from the error pipe using PeekNamedPipe
-                        if PeekNamedPipe(metadata.error_read_handle, nil, 0, nil, &total_bytes_avail, &bytes_left_this_message) {
-                            if total_bytes_avail > 0 {
-                                fmt.printf("[13] Data available in error pipe. Attempting to read.\n")
-                                if windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) {
-                                    fmt.printf("[15] Bytes read: {}\n", bytes_read)
-                                    fmt.printf("[16] Compilation output buffer as string:\n{}", cast(string)compilation_output_buffer[:bytes_read])
-                                } else {
-                                    fmt.printf("[14] ReadFile failed or no more data. Breaking out of read loop.\n")
-                                    break
+                done_retrieving_errors := false
+
+                for !done_retrieving_errors {
+                    status_of_compilation_process := windows.WaitForSingleObject(metadata.running_process, NON_BLOCKING)
+
+                    switch status_of_compilation_process {
+                        case PROCESS_COMPLETED:
+                            done_retrieving_errors = true
+                        case PROCESS_RUNNING:
+                            if PeekNamedPipe(metadata.error_read_handle, nil, 0, nil, &total_bytes_available, &bytes_left_this_message) {
+                                if total_bytes_available > 0 {
+                                    if windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) && bytes_read > 0 {
+                                        fmt.printf(cast(string)compilation_output_buffer[:bytes_read])
+                                    } else {
+                                        fmt.printf("ReadFile failed or no more data. Breaking out of read loop.\n")
+                                        done_retrieving_errors = true
+                                    }
                                 }
-                            }
-                        } else {
-                            fmt.eprintf("[18] PeekNamedPipe failed. Last error: {}\n", windows.GetLastError())
-                            break
-                        }
-                    } else {
-                        fmt.printf("[17] WaitForSingleObject returned unexpected value: {}. Exiting loop.\n", status_of_compilation_process)
-                        break
-                    }
-                }
-
-                // Ensure all remaining error output is read
-                fmt.printf("[18] Final read from compilation error pipe...\n")
-                for true {
-                    if PeekNamedPipe(metadata.error_read_handle, nil, 0, nil, &total_bytes_avail, &bytes_left_this_message) && total_bytes_avail > 0 {
-                        fmt.printf("[19] Attempting to read from error read handle: {}\n", metadata.error_read_handle)
-                        if windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) {
-                            if bytes_read > 0 {
-                                fmt.printf("[21] Bytes read: {}\n", bytes_read)
-                                fmt.printf("[22] Compilation output buffer as string:\n{}", cast(string)compilation_output_buffer[:bytes_read])
                             } else {
-                                fmt.printf("[23] No more data to read.\n")
+                                fmt.eprintf("PeekNamedPipe failed. Last error: {}\n", windows.GetLastError())
+                                done_retrieving_errors = true
+                            }
+                        case:
+                            fmt.printf("WaitForSingleObject returned unexpected value: {}. Exiting loop.\n", status_of_compilation_process)
+                            done_retrieving_errors = true
+                    }
+
+                    if done_retrieving_errors {
+                        for {
+                            if !PeekNamedPipe(metadata.error_read_handle, nil, 0, nil, &total_bytes_available, &bytes_left_this_message) || total_bytes_available == 0 {
                                 break
                             }
-                        } else {
-                            fmt.printf("[20] ReadFile failed or no more data. Breaking out of read loop.\n")
-                            break
+                            if !windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
+                                break
+                            }
+                            fmt.printf(cast(string)compilation_output_buffer[:bytes_read])
                         }
-                    } else {
-                        fmt.printf("[24] No data available in error pipe. Exiting loop.\n")
-                        break
                     }
                 }
 
-                if windows.GetExitCodeProcess(metadata.process_information.hProcess, &metadata.exit_code) {
-                    fmt.printf("[25] Exit code retrieval successful. Exit code: {}\n", metadata.exit_code)
-                    if metadata.exit_code == 0 {
-                        fmt.printf("[26] Compilation process completed successfully in {} ms.\n", time.tick_since(timer))
-                        compiled = true
-                    } else {
-                        fmt.eprintf("[27] The compilation process failed in {} ms with exit code %d.\n", time.tick_since(timer), metadata.exit_code)
-                    }
+                if !windows.GetExitCodeProcess(metadata.process_information.hProcess, &metadata.exit_code) {
+                    fmt.eprintf("Failed to get exit code of process. Last error: %d\n", windows.GetLastError())
+                } else if metadata.exit_code == 0 {
+                    compiled = true
                 } else {
-                    fmt.eprintf("[28] Failed to get exit code of process. Last error: %d\n", windows.GetLastError())
+                    fmt.eprintf("The compilation process failed in {} ms with exit code %d.\n", time.tick_since(timer), metadata.exit_code)
                 }
 
                 if metadata.error_write_handle != windows.INVALID_HANDLE_VALUE {
-                    fmt.eprintf("[29] Closing the compilation error write handle to signal no more data.\n")
                     windows.CloseHandle(metadata.error_write_handle)
                     metadata.error_write_handle = windows.INVALID_HANDLE_VALUE
                 }
 
                 if metadata.error_read_handle != windows.INVALID_HANDLE_VALUE {
-                    fmt.printf("[30] Closing error read handle after reading error output.\n")
                     windows.CloseHandle(metadata.error_read_handle)
                     metadata.error_read_handle = windows.INVALID_HANDLE_VALUE
                 }
 
                 if metadata.running_process != nil {
-                    fmt.printf("[31] Closing running process handle after error output reading.\n")
                     windows.CloseHandle(metadata.running_process)
                     metadata.running_process = nil
                 }
@@ -682,8 +651,6 @@ main :: proc() {
                 metadata.process_information.hProcess = nil
                 metadata.process_information.hThread = nil
             }
-
-            fmt.printf("[32] Compile step completed. Executing.\n")
 
             // Run the compiled file
 
