@@ -1,4 +1,4 @@
-// TODO - For testing purposes, let's make sure we handle cases where the watcher itself is updated and we attempt to compile and run it.
+// TODO: For testing purposes, let's make sure we handle cases where the watcher itself is updated and we attempt to compile and run it.
 // We see something like this when we save the watcher program file itself:
 // ```
 // REN: w.odin to w.odin~
@@ -15,8 +15,6 @@
 // It looks like we might be able to do something after the step with "INFO: Built compilation command: ..."
 // However, when we save the file itself when it contains errors, we see those errors in the output as we expect.
 
-// *TODO - Reports successful compilation when main_test.odin is saved and watched, however manually building the file yields numerous errors. Investigate.
-
 package main
 
 import "core:os"
@@ -30,28 +28,10 @@ import "core:io"
 import "core:bufio"
 import "core:path/filepath"
 
-// TODO: Maybe try messing around with PeekNamedPipe to see if we can get
-// the output of the process without blocking? Any benefit?
 
-// NOTE: Do I need to call @(default_calling_convention="stdcall") on
-// every foreign import?
-
-// TODO: Document foreign imports and how they work.
-
-// TODO: Deal with programs that alter the console mode. We need to reset the
-// console mode ourselves after every iteration through the
-// file system watcher.
-
-foreign import kernel32 "system:kernel32.lib"
-@(default_calling_convention="stdcall")
-foreign kernel32 {
-    PeekNamedPipe :: proc "stdcall" (hNamedPipe: windows.HANDLE, lpBuffer: ^u8, nBufferSize: windows.DWORD, lpBytesRead: ^windows.DWORD, lpTotalBytesAvail: ^windows.DWORD, lpBytesLeftThisMessage: ^windows.DWORD) -> windows.BOOL ---
-}
-
-ANSIRESET :: "\x1b[0m"
-ANSICLEAR :: "\x1b[2J"
-ANSIHOME  :: "\x1b[H"
-
+ANSI_RESET :: "\x1b[0m"
+ANSI_CLEAR :: "\x1b[2J"
+ANSI_HOME  :: "\x1b[H"
 BLOCKING    :: windows.INFINITE
 NON_BLOCKING :: windows.DWORD(0)
 PROCESS_COMPLETED :: windows.WAIT_OBJECT_0
@@ -62,21 +42,15 @@ PROCESS_RUNNING   :: windows.WAIT_TIMEOUT
 should_terminate : bool = false
 signal_handler :: proc "stdcall" (signal_type: windows.DWORD) -> windows.BOOL {
     context = runtime.default_context()
-    // CTRL_C_EVENT : DWORD : 0
     if signal_type == windows.CTRL_C_EVENT {
-        fmt.printf("Received CTRL-C event.\n")
+        fmt.printf("Received CTRL_C_EVENT siganl.\n")
         should_terminate = true
     }
     return windows.TRUE
 }
 
 main :: proc() {
-
-    fmt.printf("\x1b[2J") // Clear the console window when the program starts.
-    fmt.printf("\x1b[1;1H") // Move the cursor to column 0 when the program starts.
-
-    // TODO:
-    // -------------------------------------------------------------------------
+    fmt.printf("%s%s", ANSI_CLEAR, ANSI_HOME)
 
     // Memory Tracking
     // Display memory leaks when running the executable with the -debug flag.
@@ -100,15 +74,6 @@ main :: proc() {
         }
     }
 
-    // -------------------------------------------------------------------------
-
-    // TUI
-
-    // TODO: Refactor presentation into renderer.
-    // TODO: Step down gracefully when the user terminates the program.
-    // TODO: Step down gracefully when the program closes.
-    // NOTE: Disabled for now; Muratori says that SetConsoleMode is slow.
-
     h_out := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
     if h_out == windows.INVALID_HANDLE_VALUE {
         fmt.eprintf("ERROR: `h_out` is invalid: {}", windows.GetLastError())
@@ -125,7 +90,7 @@ main :: proc() {
         fmt.eprintf("ERROR: `windows.GetConsoleMode` failed: {}", windows.GetLastError())
         return
     } else {
-        fmt.printf("original_output_mode: %b\n", original_output_mode)
+        fmt.printf("DEBUG: Original output mode: %b\n", original_output_mode)
     }
 
     original_input_mode : windows.DWORD
@@ -133,7 +98,7 @@ main :: proc() {
         fmt.eprintf("ERROR: `windows.GetConsoleMode` failed: {}", windows.GetLastError())
         return
     } else {
-        fmt.printf("original_input_mode: %b\n", original_input_mode)
+        fmt.printf("DEBUG: Original input mode: %b\n", original_input_mode)
     }
 
     requested_output_mode : windows.DWORD = windows.ENABLE_WRAP_AT_EOL_OUTPUT | windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING | windows.ENABLE_PROCESSED_OUTPUT
@@ -141,8 +106,6 @@ main :: proc() {
 
     if !windows.SetConsoleMode(h_out, output_mode) {
         // We failed to set both modes, try to step down mode gracefully.
-
-        // requested_output_mode = windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING
         output_mode = original_output_mode | requested_output_mode
         if !windows.SetConsoleMode(h_out, output_mode) {
             // Failed to set any VT mode, can't do anything here.
@@ -151,7 +114,7 @@ main :: proc() {
             return
         }
     } else {
-        fmt.printf("DEBUG: output_mode: %b\n", output_mode)
+        fmt.printf("DEBUG: Current output mode: %b\n", output_mode)
     }
 
     requested_input_mode : windows.DWORD = windows.ENABLE_ECHO_INPUT | windows.ENABLE_LINE_INPUT | windows.ENABLE_WINDOW_INPUT | windows.ENABLE_PROCESSED_INPUT | windows.ENABLE_VIRTUAL_TERMINAL_INPUT
@@ -162,7 +125,7 @@ main :: proc() {
         fmt.eprintf("Failed to set any VT mode, can't do anything here.")
         return
     } else {
-        fmt.printf("DEBUG: input_mode: %b\n", input_mode)
+        fmt.printf("DEBUG: Current input_mode: %b\n", input_mode)
     }
 
     // Get console screen buffer info.
@@ -171,7 +134,7 @@ main :: proc() {
         fmt.eprintf("ERROR: `windows.GetConsoleScreenBufferInfo` failed: {}", windows.GetLastError())
         return
     }
-    fmt.printf("Console Screen Buffer Size: %d x %d\n", csbi.dwSize.X, csbi.dwSize.Y)
+    fmt.printf("DEBUG: Screen Buffer Size: %d x %d\n", csbi.dwSize.X, csbi.dwSize.Y)
 
     for i : i16 = 0; i < csbi.dwSize.X; i += 1 {
         fmt.printf("-")
@@ -179,9 +142,7 @@ main :: proc() {
     fmt.printf("\n")
 
     // File System Watcher
-    // -------------------------------------------------------------------------
 
-    // Set up the signal handler for graceful shutdown.
     windows.SetConsoleCtrlHandler(signal_handler, windows.TRUE)
 
     io_completion_port_handle := windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, nil, nil, 1)
@@ -195,7 +156,6 @@ main :: proc() {
     // TODO: Make sure the target directory exists before trying to watch it.
 
     watched_directory : windows.wstring 
-
     if len(os.args) > 1 {
         command_line_argument := os.args[1]
         file_info, file_info_error := os.lstat(command_line_argument)
@@ -218,12 +178,7 @@ main :: proc() {
         return
     }
 
-    // TODO - How do we clear up overlapped?
     overlapped := new(windows.OVERLAPPED)
-
-    // Each ID below is freed but does the handle also need to be yeeted?
-    // Something something we actaully need to keep this alive the whole time
-    // for Windows?
 
     ids := make([dynamic][3]any)
     id  := [3]any{overlapped, watched_directory_handle, watched_directory}
@@ -243,7 +198,7 @@ main :: proc() {
     }
 
     // TODO - Document slash justify the choice of buffer size here. It was pulled out of thin air.
-    buffer := make([]byte, 16 * 1024)
+    buffer := make([]byte, 2048)
     defer delete(buffer)
 
     if windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE, nil, overlapped, nil) == windows.BOOL(false) {
@@ -275,10 +230,6 @@ main :: proc() {
     metadata.security_attributes.nLength        = size_of(windows.SECURITY_ATTRIBUTES)
     metadata.creation_flags = windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT
 
-    // TODO - You were trying to wrap your head around Muratori's fast pipes thing from refterm.
-    fast_pipe_name : windows.wstring
-    fast_pipe : windows.HANDLE
-
     compiled, executing : bool = false, false
     timer : time.Tick
 
@@ -289,10 +240,8 @@ main :: proc() {
     defer delete(compilation_output_buffer)
 
     for {
-        // Prevents the CPU from getting rustled.
         time.sleep(time.Millisecond * 1)
 
-        // TODO - Make sure this is cleaning everything up properly; we may not need to do this manually.
         if should_terminate {
             if watched_directory_handle != windows.INVALID_HANDLE_VALUE {
                 windows.CloseHandle(watched_directory_handle)
@@ -313,105 +262,69 @@ main :: proc() {
             break
         }
 
-        // TODO - Finish rendering overhaul.
-        // Get the size of the console window every loop.
         if !windows.GetConsoleScreenBufferInfo(h_out, &csbi) {
-            fmt.eprintf("ERROR: `windows.GetConsoleScreenBufferInfo` failed: {}", windows.GetLastError())
-            return
+            fmt.eprintf("\x1b[31mERROR: `windows.GetConsoleScreenBufferInfo` failed: {}\x1b[0m\n", windows.GetLastError())
         }
 
+        // TODO: Deal with programs that alter the console mode. We need to reset the console mode ourselves after every iteration through the file system watcher.
+
         if executing {
-            bytes_read : windows.DWORD
+            bytes_read := windows.DWORD(0)
 
             output_buffer := make([]u8, 4096)
             defer delete(output_buffer)
 
             read_success := windows.ReadFile(metadata.output_read_handle, &output_buffer[0], u32(len(output_buffer)), &bytes_read, process_output_overlapped)
-
-            if !read_success {
+            if read_success {
+                fmt.printf("%s", output_buffer[:bytes_read])
+            } else {
                 last_error := windows.GetLastError()
-                if last_error != windows.ERROR_IO_PENDING {
-                    fmt.eprintf("ERROR: ReadFile failed: %d\n", last_error)
-                } else {
-                    bytes_read := windows.DWORD(0)
+                if last_error == windows.ERROR_IO_PENDING {
                     if !windows.GetOverlappedResult(metadata.output_read_handle, process_output_overlapped, &bytes_read, windows.TRUE) {
-                        fmt.eprintf("ERROR: GetOverlappedResult failed: %d\n", windows.GetLastError())
+                        fmt.eprintf("\x1b[31mERROR: GetOverlappedResult failed: {}\x1b[0m\n", windows.GetLastError())
                     } else {
                         fmt.printf("%s", output_buffer[:bytes_read])
                     }
+                } else {
+                    fmt.eprintf("\x1b[31mERROR: ReadFile failed: {}\x1b[0m\n", last_error)
                 }
-            } else {
-                fmt.printf("%s", output_buffer[:bytes_read])
             }
 
             status_of_running_process := windows.WaitForSingleObject(metadata.running_process, 0)
-            if status_of_running_process == PROCESS_COMPLETED{ // Process has finished
+            if status_of_running_process == PROCESS_COMPLETED {
                 if windows.GetExitCodeProcess(metadata.running_process, &metadata.exit_code) {
                     if metadata.exit_code == 0 {
-                        fmt.printf("\n")
-                        fmt.printf("Process execution completed successfully in {} ms.\n", time.tick_since(timer))
+                        fmt.printf("INFO: Process execution completed successfully in {} ms.\n", time.tick_since(timer))
                     } else {
-                        fmt.eprintf("Process completed with non-zero exit code %d.\n", metadata.exit_code)
+                        fmt.eprintf("ERROR: Process completed with non-zero exit code %d.\n", metadata.exit_code)
                     }
                 } else {
-                    fmt.eprintf("Failed to get exit code for process: %d\n", windows.GetLastError())
+                    fmt.eprintf("ERROR: Failed to get exit code for process: %d\n", windows.GetLastError())
                 }
 
-                if metadata.running_process != nil {
-                    windows.CloseHandle(metadata.running_process)
-                    metadata.running_process = nil
-                }
+                metadata.process_information.hProcess = nil
+                metadata.process_information.hThread = nil
+                metadata.output_read_handle = nil
+                metadata.error_read_handle = nil
 
-                if metadata.process_information.hProcess != nil {
-                    windows.CloseHandle(metadata.process_information.hProcess)
-                    metadata.process_information.hProcess = nil
-                }
-
-                if metadata.process_information.hThread != nil {
-                    windows.CloseHandle(metadata.process_information.hThread)
-                    metadata.process_information.hThread = nil
-                }
-
-                if metadata.process_information.dwProcessId != windows.DWORD(0) {
-                    metadata.process_information.dwProcessId = windows.DWORD(0)
-                }
-
-                if metadata.process_information.dwThreadId != windows.DWORD(0) {
-                    metadata.process_information.dwThreadId = windows.DWORD(0)
-                }
-
-                // Close and reset output and error handles
-                if metadata.output_read_handle != windows.INVALID_HANDLE_VALUE {
-                    windows.CloseHandle(metadata.output_read_handle)
-                    metadata.output_read_handle = nil
-                }
-                if metadata.error_read_handle != windows.INVALID_HANDLE_VALUE {
-                    windows.CloseHandle(metadata.error_read_handle)
-                    metadata.error_read_handle = nil
-                }
-
-                // Reset flags
                 executing = false
                 compiled = false
             }
 
             if !windows.SetConsoleMode(h_out, original_output_mode) {
-                fmt.eprintf("Failed to reset output console mode: {}", windows.GetLastError())
+                fmt.eprintf("\x1b[31mERROR: Failed to reset output console mode: {}\x1b[0m\n", windows.GetLastError())
             }
 
             if !windows.SetConsoleMode(h_in, original_input_mode) {
-                fmt.eprintf("Failed to reset input console mode: {}", windows.GetLastError())
+                fmt.eprintf("\x1b[31mERROR: Failed to reset input console mode: {}\x1b[0m\n", windows.GetLastError())
             }
-
-            // fmt.printf("DEBUG: Printing all Metadata elements:\n%.*s\n", metadata)
 
             // Reset colours.
-            fmt.printf("\033[0m")
+            fmt.printf("%s", ANSI_RESET)
 
-            for i : i16 = 0; i < csbi.dwSize.X; i += 1 {
-                fmt.printf("-")
-            }
-            fmt.printf("\n")
+            // for i : i16 = 0; i < csbi.dwSize.X; i += 1 {
+            //     fmt.printf("-")
+            // }
         }
 
         number_of_bytes_transferred := windows.DWORD(0)
@@ -424,18 +337,18 @@ main :: proc() {
                 case windows.ERROR_OPERATION_ABORTED:
                     continue
                 case:
-                    fmt.eprintf("ERROR: `windows.GetQueuedCompletionStatus` returned false. Last error: {}.\n", last_error)
+                    fmt.eprintf("\x1b[31mERROR: `windows.GetQueuedCompletionStatus` returned false. Last error: {}\x1b[0m\n", last_error)
                     break
             }
         } else {
             // Else file event detected.
-            // You should probably just put everything that follows in here?
+            // TODO: You should probably just put everything that follows in here?
         }
 
         notifications := (^windows.FILE_NOTIFY_INFORMATION)(&buffer[0])
         queue_command : bool = false
-        filename : string = ""
-        file_action_old_name : string
+        filename := ""
+        file_action_old_name := ""
 
         for {
             event_filename, event_filename_error := windows.wstring_to_utf8(&notifications.file_name[0], int(notifications.file_name_length) / 2)
@@ -458,33 +371,36 @@ main :: proc() {
             switch action {
                 case windows.FILE_ACTION_ADDED:
                     if event_filename == "4913" do break
-                    if strings.has_suffix(event_filename, ".obj") do break
-                    fmt.printf("ADD: {}\n", event_filename)
+                        if strings.has_suffix(event_filename, ".obj") do break
+                            fmt.printf("\x1b[33mEVENT: Created {}\x1b[0m\n", event_filename)
+
                 case windows.FILE_ACTION_REMOVED:
                     if event_filename == "4913" do break
-                    fmt.printf("REM: {}\n", event_filename)
+                        fmt.printf("\x1b[33mEVENT: Removed {}\x1b[0m\n", event_filename)
+
                 case windows.FILE_ACTION_MODIFIED:
-                    fmt.printf("MOD: {}\n", event_filename)
+                    fmt.printf("\x1b[33mEVENT: Modified {}\x1b[0m\n", event_filename)
                     if strings.has_suffix(event_filename, ".odin") {
-                        // We don't just process the command here immediately
-                        // because might want to log the other events that occur
-                        // after the file is modified.
+                        // We don't just process the command here immediately because might want to log the other events that occur after the file is modified.
                         queue_command = true
                         filename = event_filename
                     }
+
                 case windows.FILE_ACTION_RENAMED_OLD_NAME:
                     file_action_old_name = event_filename
+
                 case windows.FILE_ACTION_RENAMED_NEW_NAME:
-                    fmt.printf("REN: {} to {}\n", file_action_old_name, event_filename)
+                    fmt.printf("\x1b[33mEVENT: Renamed {} to {}\x1b[0m\n", file_action_old_name, event_filename)
+
                 case:
-                    fmt.eprintf("{} - Unknown action {} \n", event_filename, action)
+                    fmt.eprintf("\x1b[33m{} - Unknown action {}\x1b[0m\n", event_filename, action)
             }
 
             if notifications.next_entry_offset == 0 do break
             notifications = (^windows.FILE_NOTIFY_INFORMATION)(uintptr(notifications) + uintptr(notifications.next_entry_offset))
         }
 
-        if queue_command == true {
+        if queue_command {
 
             if metadata.running_process != windows.INVALID_HANDLE_VALUE {
                 windows.TerminateProcess(metadata.running_process, 1)
@@ -495,164 +411,86 @@ main :: proc() {
             compiled, executing = false, false
 
             // Build the filepath to the file that was modified.
-            // TODO: Pretty sure we could just append the filename to the
-            // directory path instead of doing all this, but you know.
 
-            filepath_builder := strings.builder_make()
-            defer strings.builder_destroy(&filepath_builder)
-
-            filepath_buffer : [512]u16
-            filepath_buffer_length : u32 = 512
-            filepath_length : windows.DWORD = windows.GetFinalPathNameByHandleW(watched_directory_handle, &filepath_buffer[0], filepath_buffer_length, 0)
-            filepath, filepath_error := windows.wstring_to_utf8(&filepath_buffer[0], -1)
-
-            if strings.has_prefix(filepath, "\\\\?\\") {
-                strings.write_string(&filepath_builder, filepath[4:])
-                strings.write_string(&filepath_builder, "\\")
-            } else {
-                strings.write_string(&filepath_builder, filepath)
-                strings.write_string(&filepath_builder, "\\")
-            }
-
-            filepath = strings.to_string(filepath_builder)
-            fmt.printf("Built filepath: {}\n", filepath)
-
-            strings.builder_reset(&filepath_builder)
-
-            // Build the compilation command
-
-            // TODO: Here too we could probably just bake our commands into
-            // a variable or define them in a template file and plug the
-            // filepath and filename into the template. I guess this way we can
-            // arbitrarily change the command based on the file extension we
-            // detect, so that we could for e.g. compile Odin, then C, then...
-
-            command_builder, command_builder_error := strings.builder_make_len_cap(0, 2048)
-            defer strings.builder_destroy(&command_builder)
-
-            if command_builder_error != nil {
-                fmt.printf("Error creating string builder: {}\n", command_builder_error)
+            filepath_buffer := [256]u16{}
+            filepath_length := windows.GetFinalPathNameByHandleW(watched_directory_handle, &filepath_buffer[0], 512, 0)
+            filepath_utf8, filepath_error := windows.wstring_to_utf8(&filepath_buffer[0], int(filepath_length))
+            if filepath_error != nil {
+                fmt.printf("Error converting filepath to UTF-8: {}\n", filepath_error)
                 return
             }
+            // Check if the filepath is a long path, which indicates that the path is longer than 260 characters.
+            if strings.has_prefix(filepath_utf8, "\\\\?\\") {
+                filepath_utf8 = filepath_utf8[4:]
+            }
+            filepath_builder, filepath_builder_error := strings.builder_make_len_cap(0, 512)
+            defer strings.builder_destroy(&filepath_builder)
+            fmt.sbprintf(&filepath_builder, "{}\\{}", filepath_utf8, filename)
+            filepath := strings.to_string(filepath_builder)
+            fmt.printf("\x1b[34mINFO: Built filepath: {}\x1b[0m\n", filepath)
+            strings.builder_reset(&filepath_builder)
 
-            command_prefix : string = "odin build "
-            command_suffix : string = " -file"
-            command_output : string = " -out:"
-            process_suffix : string = ".exe"
+            // Build the compilation command.
 
-            strings.write_string(&command_builder, command_prefix)
-            strings.write_string(&command_builder, filepath)
-            strings.write_string(&command_builder, filename)
-            strings.write_string(&command_builder, command_suffix)
-            strings.write_string(&command_builder, command_output)
-            strings.write_string(&command_builder, filename[:len(filename)-5])
-            strings.write_string(&command_builder, process_suffix)
-
+            command_builder, command_builder_error := strings.builder_make_len_cap(0, 512)
+            defer strings.builder_destroy(&command_builder)
+            fmt.sbprintf(&command_builder, "odin build {} -file -out:{}.exe", filepath, filename[:len(filename)-5])
             command := strings.to_string(command_builder)
             compilation_command := windows.utf8_to_wstring(command)
-            fmt.printf("Built compilation command: {}\n", command)
-
+            fmt.printf("\x1b[34mINFO: Built compilation command: {}\x1b[0m\n", command)
             strings.builder_reset(&command_builder)
 
-            // COMPILE STEP
+            // Compile the modified file using the filepath and compilation command
 
             if !compiled {
-                if windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &metadata.security_attributes, 0) {
-                    metadata.startup_information.hStdError = metadata.error_write_handle
-                } else {
+                defer {
+                    windows.CloseHandle(metadata.error_write_handle)
+                    windows.CloseHandle(metadata.error_read_handle)
+                    windows.CloseHandle(metadata.running_process)
                 }
+
+                if !windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &metadata.security_attributes, 0) {
+                    fmt.eprintf("\x1b[31mERROR: CreatePipe failed. Last error: {}\x1b[0m\n", windows.GetLastError())
+                    break
+                }
+                metadata.startup_information.hStdError = metadata.error_write_handle
 
                 timer = time.tick_now()
                 if !windows.CreateProcessW(nil, compilation_command, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
-                    if metadata.error_write_handle != windows.INVALID_HANDLE_VALUE {
-                        windows.CloseHandle(metadata.error_write_handle)
-                    }
-                    if metadata.error_read_handle != windows.INVALID_HANDLE_VALUE {
-                        windows.CloseHandle(metadata.error_read_handle)
-                    }
-                    metadata.running_process = nil
-                    fmt.printf("[9] Exiting compile step due to process creation failure.\n")
-                    // return
+                        fmt.eprintf("\x1b[31mERROR: CreateProcessW failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
-
-                windows.CloseHandle(metadata.process_information.hThread)
-                metadata.process_information.hThread = nil
                 metadata.running_process = metadata.process_information.hProcess
+                windows.CloseHandle(metadata.process_information.hThread)
+                windows.CloseHandle(metadata.error_write_handle)
 
-                bytes_read: windows.DWORD
-                total_bytes_available: windows.DWORD
-                bytes_left_this_message: windows.DWORD
-                compilation_output_buffer := make([]u8, 2048) // Smaller buffer size for quicker reads
+                compilation_output_buffer := make([]u8, 2048)
+                defer delete(compilation_output_buffer)
 
-                done_retrieving_errors := false
-
-                for !done_retrieving_errors {
-                    status_of_compilation_process := windows.WaitForSingleObject(metadata.running_process, NON_BLOCKING)
-
-                    switch status_of_compilation_process {
-                        case PROCESS_COMPLETED:
-                            done_retrieving_errors = true
-                        case PROCESS_RUNNING:
-                            if PeekNamedPipe(metadata.error_read_handle, nil, 0, nil, &total_bytes_available, &bytes_left_this_message) {
-                                if total_bytes_available > 0 {
-                                    if windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) && bytes_read > 0 {
-                                        fmt.printf(cast(string)compilation_output_buffer[:bytes_read])
-                                    } else {
-                                        fmt.printf("ReadFile failed or no more data. Breaking out of read loop.\n")
-                                        done_retrieving_errors = true
-                                    }
-                                }
-                            } else {
-                                fmt.eprintf("PeekNamedPipe failed. Last error: {}\n", windows.GetLastError())
-                                done_retrieving_errors = true
-                            }
-                        case:
-                            fmt.printf("WaitForSingleObject returned unexpected value: {}. Exiting loop.\n", status_of_compilation_process)
-                            done_retrieving_errors = true
+                for {
+                    bytes_read: windows.DWORD
+                    if !windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
+                        // Done or nothing to read.
+                        break
                     }
-
-                    if done_retrieving_errors {
-                        for {
-                            if !PeekNamedPipe(metadata.error_read_handle, nil, 0, nil, &total_bytes_available, &bytes_left_this_message) || total_bytes_available == 0 {
-                                break
-                            }
-                            if !windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
-                                break
-                            }
-                            fmt.printf(cast(string)compilation_output_buffer[:bytes_read])
-                        }
-                    }
+                    fmt.printf(string(compilation_output_buffer[:bytes_read]))
                 }
-
-                if !windows.GetExitCodeProcess(metadata.process_information.hProcess, &metadata.exit_code) {
-                    fmt.eprintf("Failed to get exit code of process. Last error: %d\n", windows.GetLastError())
+                
+                if windows.WaitForSingleObject(metadata.running_process, BLOCKING) != PROCESS_COMPLETED {
+                    fmt.eprintf("\x1b[31mERROR: WaitForSingleObject (PROCESS_COMPLETED) failed. Last error: {}\x1b[0m\n", windows.GetLastError())
+                    break
+                }
+                
+                if !windows.GetExitCodeProcess(metadata.running_process, &metadata.exit_code) {
+                    fmt.eprintf("\x1b[31mERROR: GetExitCodeProcess failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                 } else if metadata.exit_code == 0 {
-                    compiled = true
+                    compiled = true  
                 } else {
-                    fmt.eprintf("The compilation process failed in {} ms with exit code %d.\n", time.tick_since(timer), metadata.exit_code)
+                    fmt.printf("\x1b[34mINFO: Compilation failed after {} ms with exit code {}.\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
                 }
-
-                if metadata.error_write_handle != windows.INVALID_HANDLE_VALUE {
-                    windows.CloseHandle(metadata.error_write_handle)
-                    metadata.error_write_handle = windows.INVALID_HANDLE_VALUE
-                }
-
-                if metadata.error_read_handle != windows.INVALID_HANDLE_VALUE {
-                    windows.CloseHandle(metadata.error_read_handle)
-                    metadata.error_read_handle = windows.INVALID_HANDLE_VALUE
-                }
-
-                if metadata.running_process != nil {
-                    windows.CloseHandle(metadata.running_process)
-                    metadata.running_process = nil
-                }
-
-                metadata.process_information.hProcess = nil
-                metadata.process_information.hThread = nil
             }
 
-            // Run the compiled file
+            // Run the file we just built
 
             if compiled && !executing {
                 process_name := filename[:len(filename)-5]
@@ -661,27 +499,30 @@ main :: proc() {
 
                 if windows.CreatePipe(&metadata.output_read_handle, &metadata.output_write_handle, &metadata.security_attributes, 0) {
                     metadata.startup_information.hStdOutput = metadata.output_write_handle
-                } else {
                 }
 
                 if windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &metadata.security_attributes, 0) {
                     metadata.startup_information.hStdError = metadata.error_write_handle
-                } else {
                 }
 
                 timer = time.tick_now()
-                fmt.printf("~\n")
+                fmt.printf("\n")
                 if windows.CreateProcessW(nil, metadata.process_name, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
                     executing = true
-                    // fmt.printf("INFO: Running process: `%s`.\n", process_name)
+                    fmt.printf("INFO: Running process: `%s`.\n", process_name)
                     metadata.running_process = metadata.process_information.hProcess
 
-                    windows.CloseHandle(metadata.process_information.hThread)
+                    // The child process (the compiled binary we execute here) inherits the write
+                    // ends of the pipes (output_write_handle, error_write_handle). We close these
+                    // handles in the parent process after creating the child process to avoid
+                    // interfering with the child's ability to write to them.
+
+                    // Cleanup write ends of pipes 
                     windows.CloseHandle(metadata.output_write_handle)
                     windows.CloseHandle(metadata.error_write_handle)
 
-                    metadata.output_write_handle = windows.INVALID_HANDLE_VALUE
-                    metadata.error_write_handle = windows.INVALID_HANDLE_VALUE
+                    // Cleanup child process thread handle
+                    windows.CloseHandle(metadata.process_information.hThread) 
                 }
             }
             queue_command = false
