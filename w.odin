@@ -24,10 +24,6 @@ import "core:time"
 import "core:strings"
 import "core:sys/windows"
 import "core:runtime"
-import "core:io"
-import "core:bufio"
-import "core:path/filepath"
-
 
 ANSI_RESET :: "\x1b[0m"
 ANSI_CLEAR :: "\x1b[2J"
@@ -486,7 +482,7 @@ main :: proc() {
                 } else if metadata.exit_code == 0 {
                     compiled = true  
                 } else {
-                    fmt.printf("\x1b[34mINFO: Compilation failed after {} ms with exit code {}.\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
+                    fmt.printf("\x1b[31mERROR: Compilation failed after {} ms with exit code {}.\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
                 }
             }
 
