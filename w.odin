@@ -20,6 +20,7 @@ package main
 import "core:os"
 import "core:fmt"
 import "core:mem"
+import "core:math"
 import "core:time"
 import "core:strings"
 import "core:sys/windows"
@@ -152,9 +153,13 @@ main :: proc() {
     // TODO: Make sure the target directory exists before trying to watch it.
 
     watched_directory : windows.wstring 
+    filepath_test : string
+
     if len(os.args) > 1 {
         command_line_argument := os.args[1]
+
         file_info, file_info_error := os.lstat(command_line_argument)
+
         if file_info_error != 0 {
             fmt.println("ERROR: Invalid directory: {}", command_line_argument)
             return
@@ -162,10 +167,24 @@ main :: proc() {
             fmt.println("ERROR: Not a directory: {}", command_line_argument)
             return
         }
+
         watched_directory = windows.utf8_to_wstring(os.args[1])
-        fmt.printf("INFO: Watching directory: {}\n", os.args[1])
+        fmt.printf("INFO: Watching user defined directory: {}\n", os.args[1])
+
+        filepath_test = os.args[1]
+        if strings.has_prefix(filepath_test, "\\\\?\\") {
+            filepath_test = filepath_test[4:]
+            fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath_test)
+        }
     } else {
         watched_directory = windows.utf8_to_wstring(os.get_current_directory())
+        fmt.printf("INFO: Watching root directory: {}\n", os.get_current_directory())
+
+        filepath_test = os.get_current_directory()
+        if strings.has_prefix(filepath_test, "\\\\?\\") {
+            filepath_test = filepath_test[4:]
+            fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath_test)
+        }
     }
 
     watched_directory_handle : windows.HANDLE = windows.CreateFileW(watched_directory, windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OVERLAPPED, nil)
@@ -226,14 +245,17 @@ main :: proc() {
     metadata.security_attributes.nLength        = size_of(windows.SECURITY_ATTRIBUTES)
     metadata.creation_flags = windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT
 
-    compiled, executing : bool = false, false
-    timer : time.Tick
-
     process_output_overlapped := new(windows.OVERLAPPED)
     process_output_overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
 
     compilation_output_buffer := make([]u8, 4096)
     defer delete(compilation_output_buffer)
+
+    builder, builder_error := strings.builder_make_len_cap(0, 512)
+    defer strings.builder_destroy(&builder)
+
+    compiled, executing : bool = false, false
+    timer : time.Tick
 
     for {
         time.sleep(time.Millisecond * 1)
@@ -290,12 +312,12 @@ main :: proc() {
             if status_of_running_process == PROCESS_COMPLETED {
                 if windows.GetExitCodeProcess(metadata.running_process, &metadata.exit_code) {
                     if metadata.exit_code == 0 {
-                        fmt.printf("INFO: Process execution completed successfully in {} ms.\n", time.tick_since(timer))
+                        fmt.printf("\x1b[32mINFO: Process execution completed successfully in {} ms.\x1b[0m\n", time.tick_since(timer))
                     } else {
-                        fmt.eprintf("ERROR: Process completed with non-zero exit code %d.\n", metadata.exit_code)
+                        fmt.eprintf("\x1b[31mERROR: Process completed with non-zero exit code %d.\x1b[0m\n", metadata.exit_code)
                     }
                 } else {
-                    fmt.eprintf("ERROR: Failed to get exit code for process: %d\n", windows.GetLastError())
+                    fmt.eprintf("\x1b[31mERROR: Failed to get exit code for process: %d\x1b[0m\n\n", windows.GetLastError())
                 }
 
                 metadata.process_information.hProcess = nil
@@ -321,6 +343,7 @@ main :: proc() {
             // for i : i16 = 0; i < csbi.dwSize.X; i += 1 {
             //     fmt.printf("-")
             // }
+
         }
 
         number_of_bytes_transferred := windows.DWORD(0)
@@ -337,8 +360,9 @@ main :: proc() {
                     break
             }
         } else {
-            // Else file event detected.
             // TODO: You should probably just put everything that follows in here?
+            // Else file event detected.
+            // fmt.printf("\x1b[32mINFO: Event detected.\x1b[0m\n")
         }
 
         notifications := (^windows.FILE_NOTIFY_INFORMATION)(&buffer[0])
@@ -386,7 +410,7 @@ main :: proc() {
                     file_action_old_name = event_filename
 
                 case windows.FILE_ACTION_RENAMED_NEW_NAME:
-                    fmt.printf("\x1b[33mEVENT: Renamed {} to {}\x1b[0m\n", file_action_old_name, event_filename)
+                    fmt.printf("\n\x1b[33mEVENT: Renamed {} to {}\x1b[0m\n", file_action_old_name, event_filename)
 
                 case:
                     fmt.eprintf("\x1b[33m{} - Unknown action {}\x1b[0m\n", event_filename, action)
@@ -406,35 +430,14 @@ main :: proc() {
 
             compiled, executing = false, false
 
-            // Build the filepath to the file that was modified.
+            // TODO: Don't hardcode extension length.
 
-            filepath_buffer := [256]u16{}
-            filepath_length := windows.GetFinalPathNameByHandleW(watched_directory_handle, &filepath_buffer[0], 512, 0)
-            filepath_utf8, filepath_error := windows.wstring_to_utf8(&filepath_buffer[0], int(filepath_length))
-            if filepath_error != nil {
-                fmt.printf("Error converting filepath to UTF-8: {}\n", filepath_error)
-                return
-            }
-            // Check if the filepath is a long path, which indicates that the path is longer than 260 characters.
-            if strings.has_prefix(filepath_utf8, "\\\\?\\") {
-                filepath_utf8 = filepath_utf8[4:]
-            }
-            filepath_builder, filepath_builder_error := strings.builder_make_len_cap(0, 512)
-            defer strings.builder_destroy(&filepath_builder)
-            fmt.sbprintf(&filepath_builder, "{}\\{}", filepath_utf8, filename)
-            filepath := strings.to_string(filepath_builder)
-            fmt.printf("\x1b[34mINFO: Built filepath: {}\x1b[0m\n", filepath)
-            strings.builder_reset(&filepath_builder)
-
-            // Build the compilation command.
-
-            command_builder, command_builder_error := strings.builder_make_len_cap(0, 512)
-            defer strings.builder_destroy(&command_builder)
-            fmt.sbprintf(&command_builder, "odin build {} -file -out:{}{}.exe", filepath, filepath[:len(filepath) - len(filename)], filename[:len(filename)-5])
-            command := strings.to_string(command_builder)
-            compilation_command := windows.utf8_to_wstring(command)
-            fmt.printf("\x1b[34mINFO: Built compilation command: {}\x1b[0m\n", command)
-            strings.builder_reset(&command_builder)
+            strings.builder_reset(&builder) // Ensure the builder is reset before use
+            fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.exe", filepath_test, filename, filepath_test, filename[:len(filename)-5])
+            command_new := strings.to_string(builder)
+            fmt.printf("\x1b[34mTEST: Built compilation command: {}\x1b[0m\n", command_new)
+            compilation_command := windows.utf8_to_wstring(command_new)
+            strings.builder_reset(&builder)
 
             // Compile the modified file using the filepath and compilation command
 
@@ -459,9 +462,6 @@ main :: proc() {
                 metadata.running_process = metadata.process_information.hProcess
                 windows.CloseHandle(metadata.process_information.hThread)
                 windows.CloseHandle(metadata.error_write_handle)
-
-                compilation_output_buffer := make([]u8, 2048)
-                defer delete(compilation_output_buffer)
 
                 for {
                     bytes_read: windows.DWORD
@@ -489,16 +489,12 @@ main :: proc() {
             // Run the file we just built
 
             if compiled && !executing {
-                // TODO: Refactor this so that you can derive the process name from the filepath or compilation command steps.
-                process_name_builder, process_name_builder_error := strings.builder_make_len_cap(0, 512)
-                defer strings.builder_destroy(&process_name_builder)
-                strings.write_string(&process_name_builder, filepath[:len(filepath) - 4])
-                strings.write_string(&process_name_builder, "exe")
-                process_name := strings.to_string(process_name_builder)
-                fmt.printf("\x1b[34mINFO: Built process name: {}\x1b[0m\n", process_name)
-                strings.builder_reset(&process_name_builder)
+                strings.builder_reset(&builder) // Ensure the builder is reset before use
+                fmt.sbprintf(&builder, "{}\\{}.exe", filepath_test, filename[:len(filename)-5])
+                process_name := strings.to_string(builder)
+                fmt.printf("\x1b[34minfo: built process name: {}\x1b[0m\n", process_name)
                 metadata.process_name = windows.utf8_to_wstring(process_name)
-                fmt.printf("\x1b[34mINFO: Attempting to run process: `%s`\x1b[0m\n", process_name)
+                fmt.printf("\x1b[34mINFO: Attempting to run process: %s\x1b[0m\n", process_name)
 
                 if windows.CreatePipe(&metadata.output_read_handle, &metadata.output_write_handle, &metadata.security_attributes, 0) {
                     metadata.startup_information.hStdOutput = metadata.output_write_handle
@@ -509,10 +505,9 @@ main :: proc() {
                 }
 
                 timer = time.tick_now()
-                fmt.printf("\n")
                 if windows.CreateProcessW(nil, metadata.process_name, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
                     executing = true
-                    fmt.printf("\x1b[34mINFO: Running process: `%s`\x1b[0m\n", process_name)
+                    fmt.printf("\x1b[34mINFO: Running process: %s\x1b[0m\n", process_name)
                     metadata.running_process = metadata.process_information.hProcess
 
                     // The child process (the compiled binary we execute here) inherits the write
