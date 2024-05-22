@@ -430,7 +430,7 @@ main :: proc() {
 
             command_builder, command_builder_error := strings.builder_make_len_cap(0, 512)
             defer strings.builder_destroy(&command_builder)
-            fmt.sbprintf(&command_builder, "odin build {} -file -out:{}.exe", filepath, filename[:len(filename)-5])
+            fmt.sbprintf(&command_builder, "odin build {} -file -out:{}{}.exe", filepath, filepath[:len(filepath) - len(filename)], filename[:len(filename)-5])
             command := strings.to_string(command_builder)
             compilation_command := windows.utf8_to_wstring(command)
             fmt.printf("\x1b[34mINFO: Built compilation command: {}\x1b[0m\n", command)
@@ -482,16 +482,23 @@ main :: proc() {
                 } else if metadata.exit_code == 0 {
                     compiled = true  
                 } else {
-                    fmt.printf("\x1b[31mERROR: Compilation failed after {} ms with exit code {}.\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
+                    fmt.printf("\x1b[31mERROR: Compilation failed after {} ms with exit code {}\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
                 }
             }
 
             // Run the file we just built
 
             if compiled && !executing {
-                process_name := filename[:len(filename)-5]
+                // TODO: Refactor this so that you can derive the process name from the filepath or compilation command steps.
+                process_name_builder, process_name_builder_error := strings.builder_make_len_cap(0, 512)
+                defer strings.builder_destroy(&process_name_builder)
+                strings.write_string(&process_name_builder, filepath[:len(filepath) - 4])
+                strings.write_string(&process_name_builder, "exe")
+                process_name := strings.to_string(process_name_builder)
+                fmt.printf("\x1b[34mINFO: Built process name: {}\x1b[0m\n", process_name)
+                strings.builder_reset(&process_name_builder)
                 metadata.process_name = windows.utf8_to_wstring(process_name)
-                fmt.printf("Attempting to run process: `%s`.\n", process_name)
+                fmt.printf("\x1b[34mINFO: Attempting to run process: `%s`\x1b[0m\n", process_name)
 
                 if windows.CreatePipe(&metadata.output_read_handle, &metadata.output_write_handle, &metadata.security_attributes, 0) {
                     metadata.startup_information.hStdOutput = metadata.output_write_handle
@@ -505,7 +512,7 @@ main :: proc() {
                 fmt.printf("\n")
                 if windows.CreateProcessW(nil, metadata.process_name, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
                     executing = true
-                    fmt.printf("INFO: Running process: `%s`.\n", process_name)
+                    fmt.printf("\x1b[34mINFO: Running process: `%s`\x1b[0m\n", process_name)
                     metadata.running_process = metadata.process_information.hProcess
 
                     // The child process (the compiled binary we execute here) inherits the write
@@ -526,7 +533,7 @@ main :: proc() {
 
         FSW_WATCHING_EVENTS : windows.DWORD : windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE
         if !windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, FSW_WATCHING_EVENTS, nil, overlapped, nil) {
-            fmt.eprintf("ReadDirectoryChangesW failed! \n")
+            fmt.eprintf("\x1b[31mERROR: ReadDirectoryChangesW failed!\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
         }
     }
 }
