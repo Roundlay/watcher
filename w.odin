@@ -1,26 +1,8 @@
-// TODO: For testing purposes, let's make sure we handle cases where the watcher itself is updated and we attempt to compile and run it.
-// We see something like this when we save the watcher program file itself:
-// ```
-// REN: w.odin to w.odin~
-// ADD: w.odin
-// MOD: w.odin
-// REM: w.odin~
-// INFO: Built filepath: C:\Users\Christopher\Projects\Advent\2023\
-// INFO: Built compilation command: odin build C:\Users\Christopher\Projects\Advent\2023\w.odin -file -out:w.exe
-// LINK : fatal error LNK1104: cannot open file 'C:\Users\Christopher\Projects\Advent\2023\w.exe'
-// WARN: The compilation process completed with exit code 1104.
-// INFO: Closing the compilation error write handle to signal no more data.
-// INFO: Reading from compilation error pipe...
-// ```
-// It looks like we might be able to do something after the step with "INFO: Built compilation command: ..."
-// However, when we save the file itself when it contains errors, we see those errors in the output as we expect.
-
 package main
 
 import "core:os"
 import "core:fmt"
 import "core:mem"
-import "core:math"
 import "core:time"
 import "core:strings"
 import "core:sys/windows"
@@ -49,7 +31,6 @@ signal_handler :: proc "stdcall" (signal_type: windows.DWORD) -> windows.BOOL {
 main :: proc() {
     fmt.printf("%s%s", ANSI_CLEAR, ANSI_HOME)
 
-    // Memory Tracking
     // Display memory leaks when running the executable with the -debug flag.
     when ODIN_DEBUG {
         track: mem.Tracking_Allocator
@@ -149,11 +130,10 @@ main :: proc() {
     // Make sure to pass the full file path to the Odin compiler, otherwise the
     // watcher will always look for events in the same directory as the watcher
     // executable.
-    // ** TODO: Make sure the target directory is passed to the filename builder.
-    // TODO: Make sure the target directory exists before trying to watch it.
 
+    // TODO: Make sure the target directory exists before trying to watch it.
     watched_directory : windows.wstring 
-    filepath_test : string
+    filepath : string
 
     if len(os.args) > 1 {
         command_line_argument := os.args[1]
@@ -171,19 +151,19 @@ main :: proc() {
         watched_directory = windows.utf8_to_wstring(os.args[1])
         fmt.printf("INFO: Watching user defined directory: {}\n", os.args[1])
 
-        filepath_test = os.args[1]
-        if strings.has_prefix(filepath_test, "\\\\?\\") {
-            filepath_test = filepath_test[4:]
-            fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath_test)
+        filepath = os.args[1]
+        if strings.has_prefix(filepath, "\\\\?\\") {
+            filepath = filepath[4:]
+            fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath)
         }
     } else {
         watched_directory = windows.utf8_to_wstring(os.get_current_directory())
         fmt.printf("INFO: Watching root directory: {}\n", os.get_current_directory())
 
-        filepath_test = os.get_current_directory()
-        if strings.has_prefix(filepath_test, "\\\\?\\") {
-            filepath_test = filepath_test[4:]
-            fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath_test)
+        filepath = os.get_current_directory()
+        if strings.has_prefix(filepath, "\\\\?\\") {
+            filepath = filepath[4:]
+            fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath)
         }
     }
 
@@ -285,7 +265,6 @@ main :: proc() {
         }
 
         // TODO: Deal with programs that alter the console mode. We need to reset the console mode ourselves after every iteration through the file system watcher.
-
         if executing {
             bytes_read := windows.DWORD(0)
 
@@ -339,11 +318,6 @@ main :: proc() {
 
             // Reset colours.
             fmt.printf("%s", ANSI_RESET)
-
-            // for i : i16 = 0; i < csbi.dwSize.X; i += 1 {
-            //     fmt.printf("-")
-            // }
-
         }
 
         number_of_bytes_transferred := windows.DWORD(0)
@@ -356,7 +330,7 @@ main :: proc() {
                 case windows.ERROR_OPERATION_ABORTED:
                     continue
                 case:
-                    fmt.eprintf("\x1b[31mERROR: `windows.GetQueuedCompletionStatus` returned false. Last error: {}\x1b[0m\n", last_error)
+                    fmt.eprintf("\x1b[31mERROR: GetQueuedCompletionStatus returned false. Last error: {}\x1b[0m\n", last_error)
                     break
             }
         } else {
@@ -366,7 +340,9 @@ main :: proc() {
         }
 
         notifications := (^windows.FILE_NOTIFY_INFORMATION)(&buffer[0])
+
         queue_command : bool = false
+
         filename := ""
         file_action_old_name := ""
 
@@ -382,11 +358,6 @@ main :: proc() {
             // associated with different editors that we can use to filter
             // out events that we don't care about or to identify the editor if
             // we want to display something in the UI.
-
-            // TODO:
-            // Make sure filename, file_action_old_name, and event_filename are not being appended to but rather are being overwritten.
-            // Debugger indicates the values are being appended to.
-            // `0x18999fa5155 -> "d1_2023.odind1_2023.odin~\\\\\?\\C:\\Users\\Christopher\\Projects\\Advent\\2023"`
 
             switch action {
                 case windows.FILE_ACTION_ADDED:
@@ -431,12 +402,10 @@ main :: proc() {
             compiled, executing = false, false
 
             // TODO: Don't hardcode extension length.
-
             strings.builder_reset(&builder) // Ensure the builder is reset before use
-            fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.exe", filepath_test, filename, filepath_test, filename[:len(filename)-5])
-            command_new := strings.to_string(builder)
-            fmt.printf("\x1b[34mTEST: Built compilation command: {}\x1b[0m\n", command_new)
-            compilation_command := windows.utf8_to_wstring(command_new)
+            fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.exe", filepath, filename, filepath, filename[:len(filename)-5])
+            command := strings.to_string(builder)
+            fmt.printf("\x1b[34mTEST: Built compilation command: {}\x1b[0m\n", command)
             strings.builder_reset(&builder)
 
             // Compile the modified file using the filepath and compilation command
@@ -455,7 +424,7 @@ main :: proc() {
                 metadata.startup_information.hStdError = metadata.error_write_handle
 
                 timer = time.tick_now()
-                if !windows.CreateProcessW(nil, compilation_command, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
+                if !windows.CreateProcessW(nil, windows.utf8_to_wstring(command), nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
                         fmt.eprintf("\x1b[31mERROR: CreateProcessW failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
@@ -486,13 +455,12 @@ main :: proc() {
                 }
             }
 
-            // Run the file we just built
+            // Run the file that we just built
 
             if compiled && !executing {
                 strings.builder_reset(&builder) // Ensure the builder is reset before use
-                fmt.sbprintf(&builder, "{}\\{}.exe", filepath_test, filename[:len(filename)-5])
+                fmt.sbprintf(&builder, "{}\\{}.exe", filepath, filename[:len(filename)-5])
                 process_name := strings.to_string(builder)
-                fmt.printf("\x1b[34minfo: built process name: {}\x1b[0m\n", process_name)
                 metadata.process_name = windows.utf8_to_wstring(process_name)
                 fmt.printf("\x1b[34mINFO: Attempting to run process: %s\x1b[0m\n", process_name)
 
