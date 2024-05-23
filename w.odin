@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:mem"
 import "core:time"
 import "core:strings"
+import "core:strconv"
 import "core:sys/windows"
 import "core:runtime"
 
@@ -228,7 +229,9 @@ main :: proc() {
     process_output_overlapped := new(windows.OVERLAPPED)
     process_output_overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
 
-    compilation_output_buffer := make([]u8, 4096)
+    // Need to make sure the size of the buffer is pretty big if we want to start parsing and colouring the output.
+    // 4096 supported about 76 lines of compiler output before it had to be resized.
+    compilation_output_buffer := make([]u8, 4096 * 2)
     defer delete(compilation_output_buffer)
 
     builder, builder_error := strings.builder_make_len_cap(0, 512)
@@ -361,13 +364,12 @@ main :: proc() {
 
             switch action {
                 case windows.FILE_ACTION_ADDED:
-                    if event_filename == "4913" do break
-                        if strings.has_suffix(event_filename, ".obj") do break
-                            fmt.printf("\x1b[33mEVENT: Created {}\x1b[0m\n", event_filename)
+                    if strings.contains(event_filename, "4913") do break
+                    fmt.printf("\x1b[33mEVENT: Created {}\x1b[0m\n", event_filename)
 
                 case windows.FILE_ACTION_REMOVED:
-                    if event_filename == "4913" do break
-                        fmt.printf("\x1b[33mEVENT: Removed {}\x1b[0m\n", event_filename)
+                    if strings.contains(event_filename, "4913") do break
+                    fmt.printf("\x1b[33mEVENT: Removed {}\x1b[0m\n", event_filename)
 
                 case windows.FILE_ACTION_MODIFIED:
                     fmt.printf("\x1b[33mEVENT: Modified {}\x1b[0m\n", event_filename)
@@ -409,6 +411,16 @@ main :: proc() {
             strings.builder_reset(&builder)
 
             // Compile the modified file using the filepath and compilation command
+            Error :: struct {
+                message, snippet, underline: string,
+                row, column : int,
+                coordinates, carots : [2]int,
+                suggestions : [dynamic]string,
+            }
+
+            error: Error
+            error.coordinates = {0, 0}
+            error.carots = {0, 0}
 
             if !compiled {
                 defer {
@@ -432,13 +444,94 @@ main :: proc() {
                 windows.CloseHandle(metadata.process_information.hThread)
                 windows.CloseHandle(metadata.error_write_handle)
 
+                compiler_output : string
+
                 for {
                     bytes_read: windows.DWORD
                     if !windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
-                        // Done or nothing to read.
                         break
                     }
-                    fmt.printf(string(compilation_output_buffer[:bytes_read]))
+
+                    compiler_output = cast(string)compilation_output_buffer[:bytes_read]
+                    process_suggestions := false
+
+                    // TODO: Formatting doesn't work for errors with suggestions.
+                    // TODO: Batch print errors in one go.
+
+                    for line in strings.split(compiler_output, "\n") {
+                        // fmt.printf("\x1b[31m{}\x1b[0m\n", line)
+
+                        if strings.index(line, ":/") == 1 {
+                            error.coordinates = [2]int{strings.index_any(line, "(") + 1, strings.index_any(line, ")")}
+                            if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
+                                coordinates_pair := line[error.coordinates[0] : error.coordinates[1]]
+                                coordinates := strings.split(coordinates_pair , ":")
+
+                                if len(coordinates) == 2 {
+                                    error.row = strconv.atoi(coordinates[0])
+                                    error.column = strconv.atoi(coordinates[1])
+                                    fmt.printf("\x1b[31mRow: {}, Column: {}\x1b[0m\n", error.row, error.column)
+                                }
+
+                                error.message = strings.trim_left_space(line[error.coordinates[1] + 1:])
+                                fmt.printf("\x1b[31m{}\x1b[0m\n", error.message)
+                            }
+
+                            process_suggestions = false
+                            continue
+                        }
+
+                        // Check if the line contains the snippet (line after the error message)
+                        if error.message != "" && error.snippet == "" && strings.trim_left_space(line) != "" {
+                            error.snippet = strings.trim_left_space(line)
+                            fmt.printf("\x1b[31m{}\x1b[0m\n", error.snippet)
+                            continue
+                        }
+
+                        // Check if the line contains the underline (line after the snippet)
+                        // TODO: If we want to put the row before the snippet we need to account for the length of the row and the formatting.
+                        if error.snippet != "" && error.carots == {0, 0} && strings.index_any(line, "^~") != -1 {
+                            error.carots[0] = strings.index_any(line, "^~") - 1
+                            error.carots[1] = strings.last_index_any(line, "^~")
+                            // fmt.printf("\x1b[31mUnderline positions: {} to {}\x1b[0m\n", error.carots[0], error.carots[1])
+                            for i in 0..<error.carots[1] {
+                                if i < error.carots[0] {
+                                    fmt.eprintf("\x1b[31m{}\x1b[0m", " ")
+                                } else {
+                                    fmt.eprintf("\x1b[31m{}\x1b[0m", "^")
+                                }
+                            }
+                            fmt.printf("\n")
+                            continue
+                        }
+
+                        // Check if the line contains suggestions
+                        if strings.contains(line, "Suggestion:") {
+                            process_suggestions = true
+                            continue
+                        }
+
+                        if process_suggestions == true {
+                            if strings.index(line, ":/") == 1 {
+                                process_suggestions = false
+                                fmt.printf("\x1b[31mSuggestion: {}\x1b[0m\n", error.suggestions)
+                            } else {
+                                suggestion := strings.trim_left_space(line)
+                                append(&error.suggestions, suggestion)
+                                continue
+                            }
+                        }
+                        error = Error{}
+                    }
+
+                    strings.builder_reset(&builder)
+
+                    // compilation_output := string(compilation_output_buffer[:bytes_read])
+                    // for line in strings.split_by_byte_iterator(&compilation_output, '\n') {
+                    //     fmt.eprintf("\x1b[33m{}\x1b[0m\n", line)
+                    // }
+
+                    // fmt.printf(string(compilation_output_buffer[:bytes_read]))
                 }
                 
                 if windows.WaitForSingleObject(metadata.running_process, BLOCKING) != PROCESS_COMPLETED {
