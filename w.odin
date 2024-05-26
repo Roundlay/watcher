@@ -452,19 +452,19 @@ main :: proc() {
                         break
                     }
 
-                    compiler_output = cast(string)compilation_output_buffer[:bytes_read]
-                    process_suggestions := false
 
                     // TODO: Formatting doesn't work for errors with suggestions.
                     // TODO: Batch print errors in one go.
 
-                    for line in strings.split(compiler_output, "\n") {
-                        // fmt.printf("\x1b[31m{}\x1b[0m\n", line)
+                    compiler_output = cast(string)compilation_output_buffer[:bytes_read]
+                    compiler_output_lines := strings.split(compiler_output, "\n")
+                    fmt.printf("\x1b[31m{}\x1b[0m\n", compiler_output_lines)
 
-                        if strings.index(line, ":/") == 1 {
-                            error.coordinates = [2]int{strings.index_any(line, "(") + 1, strings.index_any(line, ")")}
+                    for i := 0; i <= len(compiler_output_lines) - 1; i += 1 {
+                        if strings.index(compiler_output_lines[i], ":/") == 1 {
+                            error.coordinates = {strings.index_any(compiler_output_lines[i], "(") + 1, strings.index_any(compiler_output_lines[i], ")")}
                             if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
-                                coordinates_pair := line[error.coordinates[0] : error.coordinates[1]]
+                                coordinates_pair := compiler_output_lines[i][error.coordinates[0] : error.coordinates[1]]
                                 coordinates := strings.split(coordinates_pair , ":")
 
                                 if len(coordinates) == 2 {
@@ -472,28 +472,17 @@ main :: proc() {
                                     error.column = strconv.atoi(coordinates[1])
                                     fmt.printf("\x1b[31mRow: {}, Column: {}\x1b[0m\n", error.row, error.column)
                                 }
-
-                                error.message = strings.trim_left_space(line[error.coordinates[1] + 1:])
-                                fmt.printf("\x1b[31m{}\x1b[0m\n", error.message)
                             }
 
-                            process_suggestions = false
-                            continue
-                        }
+                            error.message = strings.trim_left_space(compiler_output_lines[i][error.coordinates[1] + 1:])
+                            fmt.printf("\x1b[31m{}\x1b[0m\n", error.message)
 
-                        // Check if the line contains the snippet (line after the error message)
-                        if error.message != "" && error.snippet == "" && strings.trim_left_space(line) != "" {
-                            error.snippet = strings.trim_left_space(line)
+                            error.snippet = strings.trim_left_space(compiler_output_lines[i + 1])
                             fmt.printf("\x1b[31m{}\x1b[0m\n", error.snippet)
-                            continue
-                        }
 
-                        // Check if the line contains the underline (line after the snippet)
-                        // TODO: If we want to put the row before the snippet we need to account for the length of the row and the formatting.
-                        if error.snippet != "" && error.carots == {0, 0} && strings.index_any(line, "^~") != -1 {
-                            error.carots[0] = strings.index_any(line, "^~") - 1
-                            error.carots[1] = strings.last_index_any(line, "^~")
-                            // fmt.printf("\x1b[31mUnderline positions: {} to {}\x1b[0m\n", error.carots[0], error.carots[1])
+                            error.carots[0] = strings.index_any(compiler_output_lines[i + 2], "^~") - 1
+                            error.carots[1] = strings.last_index_any(compiler_output_lines[i + 2], "^~")
+
                             for i in 0..<error.carots[1] {
                                 if i < error.carots[0] {
                                     fmt.eprintf("\x1b[31m{}\x1b[0m", " ")
@@ -502,27 +491,75 @@ main :: proc() {
                                 }
                             }
                             fmt.printf("\n")
-                            continue
-                        }
-
-                        // Check if the line contains suggestions
-                        if strings.contains(line, "Suggestion:") {
-                            process_suggestions = true
-                            continue
-                        }
-
-                        if process_suggestions == true {
-                            if strings.index(line, ":/") == 1 {
-                                process_suggestions = false
-                                fmt.printf("\x1b[31mSuggestion: {}\x1b[0m\n", error.suggestions)
-                            } else {
-                                suggestion := strings.trim_left_space(line)
-                                append(&error.suggestions, suggestion)
-                                continue
-                            }
-                        }
+                        } // Handle suggestions
                         error = Error{}
                     }
+
+                    // for line in strings.split(compiler_output, "\n") {
+                    //     // fmt.printf("\x1b[31m{}\x1b[0m\n", line)
+                    //
+                    //     if strings.index(line, ":/") == 1 {
+                    //         error.coordinates = [2]int{strings.index_any(line, "(") + 1, strings.index_any(line, ")")}
+                    //         if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
+                    //             coordinates_pair := line[error.coordinates[0] : error.coordinates[1]]
+                    //             coordinates := strings.split(coordinates_pair , ":")
+                    //
+                    //             if len(coordinates) == 2 {
+                    //                 error.row = strconv.atoi(coordinates[0])
+                    //                 error.column = strconv.atoi(coordinates[1])
+                    //                 fmt.printf("\x1b[31mRow: {}, Column: {}\x1b[0m\n", error.row, error.column)
+                    //             }
+                    //
+                    //             error.message = strings.trim_left_space(line[error.coordinates[1] + 1:])
+                    //             fmt.printf("\x1b[31m{}\x1b[0m\n", error.message)
+                    //         }
+                    //
+                    //         process_suggestions = false
+                    //         continue
+                    //     }
+                    //
+                    //     // Check if the line contains the snippet (line after the error message)
+                    //     if error.message != "" && error.snippet == "" && strings.trim_left_space(line) != "" {
+                    //         error.snippet = strings.trim_left_space(line)
+                    //         fmt.printf("\x1b[31m{}\x1b[0m\n", error.snippet)
+                    //         continue
+                    //     }
+                    //
+                    //     // Check if the line contains the underline (line after the snippet)
+                    //     // TODO: If we want to put the row before the snippet we need to account for the length of the row and the formatting.
+                    //     if error.snippet != "" && strings.index_any(line, "^~") != -1 {
+                    //         error.carots[0] = strings.index_any(line, "^~") - 1
+                    //         error.carots[1] = strings.last_index_any(line, "^~")
+                    //         // fmt.printf("\x1b[31mUnderline positions: {} to {}\x1b[0m\n", error.carots[0], error.carots[1])
+                    //         for i in 0..<error.carots[1] {
+                    //             if i < error.carots[0] {
+                    //                 fmt.eprintf("\x1b[31m{}\x1b[0m", " ")
+                    //             } else {
+                    //                 fmt.eprintf("\x1b[31m{}\x1b[0m", "^")
+                    //             }
+                    //         }
+                    //         fmt.printf("\n")
+                    //         continue
+                    //     }
+                    //
+                    //     // Check if the line contains suggestions
+                    //     if strings.contains(line, "Suggestion:") {
+                    //         process_suggestions = true
+                    //         continue
+                    //     }
+                    //
+                    //     if process_suggestions == true {
+                    //         if strings.index(line, ":/") == 1 {
+                    //             process_suggestions = false
+                    //             fmt.printf("\x1b[31mSuggestion: {}\x1b[0m\n", error.suggestions)
+                    //         } else {
+                    //             suggestion := strings.trim_left_space(line)
+                    //             append(&error.suggestions, suggestion)
+                    //             continue
+                    //         }
+                    //     }
+                    //     error = Error{}
+                    // }
 
                     strings.builder_reset(&builder)
 
