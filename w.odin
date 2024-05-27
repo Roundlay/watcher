@@ -412,15 +412,16 @@ main :: proc() {
 
             // Compile the modified file using the filepath and compilation command
             Error :: struct {
-                message, snippet, underline: string,
+                filepath, message, snippet, underline: string,
                 row, column : int,
-                coordinates, carots : [2]int,
+                coordinates, carots: [2]int,
                 suggestions : [dynamic]string,
             }
 
             error: Error
             error.coordinates = {0, 0}
             error.carots = {0, 0}
+            coordinates : []string
 
             if !compiled {
                 defer {
@@ -445,6 +446,8 @@ main :: proc() {
                 windows.CloseHandle(metadata.error_write_handle)
 
                 compiler_output : string
+                parse_suggestions := false
+                line_offeset := 0
 
                 for {
                     bytes_read: windows.DWORD
@@ -452,116 +455,72 @@ main :: proc() {
                         break
                     }
 
-
-                    // TODO: Formatting doesn't work for errors with suggestions.
-                    // TODO: Batch print errors in one go.
-
                     compiler_output = cast(string)compilation_output_buffer[:bytes_read]
+                    fmt.printf("\x1b[34m{}\x1b[0m", compiler_output)
                     compiler_output_lines := strings.split(compiler_output, "\n")
-                    fmt.printf("\x1b[31m{}\x1b[0m\n", compiler_output_lines)
 
                     for i := 0; i <= len(compiler_output_lines) - 1; i += 1 {
                         if strings.index(compiler_output_lines[i], ":/") == 1 {
+                            // TODO: Make sure we group the compiler errors by filepath so we don't have to display the filepath for every error.
+                            // TODO: Could also just display .../file.odin for each file.
+                            // .../main.odin (1:2) - error: expected 'main' to be declared in this file
+                            error.filepath = strings.cut(compiler_output_lines[i], 0, strings.index(compiler_output_lines[i], "("))
+
                             error.coordinates = {strings.index_any(compiler_output_lines[i], "(") + 1, strings.index_any(compiler_output_lines[i], ")")}
                             if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
-                                coordinates_pair := compiler_output_lines[i][error.coordinates[0] : error.coordinates[1]]
-                                coordinates := strings.split(coordinates_pair , ":")
+                                // coordinates_pair := compiler_output_lines[i][error.coordinates[0] : error.coordinates[1]]
+                                coordinates = strings.split(compiler_output_lines[i][error.coordinates[0] : error.coordinates[1]], ":")
 
                                 if len(coordinates) == 2 {
                                     error.row = strconv.atoi(coordinates[0])
                                     error.column = strconv.atoi(coordinates[1])
-                                    fmt.printf("\x1b[31mRow: {}, Column: {}\x1b[0m\n", error.row, error.column)
                                 }
                             }
 
                             error.message = strings.trim_left_space(compiler_output_lines[i][error.coordinates[1] + 1:])
-                            fmt.printf("\x1b[31m{}\x1b[0m\n", error.message)
+                            fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.message)
 
                             error.snippet = strings.trim_left_space(compiler_output_lines[i + 1])
-                            fmt.printf("\x1b[31m{}\x1b[0m\n", error.snippet)
+                            fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.snippet)
+                            // row_column_separator := ":"
+                            // line_code_separator := " | "
+                            // fmt.sbprintf(&builder, "\x1b[31m{}{}{}{}{}\x1b[0m\n", error.row, row_column_separator, error.column, line_code_separator, error.snippet)
 
-                            error.carots[0] = strings.index_any(compiler_output_lines[i + 2], "^~") - 1
-                            error.carots[1] = strings.last_index_any(compiler_output_lines[i + 2], "^~")
+                            error.carots[0] = strings.index_any(compiler_output_lines[i + 2], "^") - 1
+                            error.carots[1] = strings.last_index_any(compiler_output_lines[i + 2], "^") - 1
 
-                            for i in 0..<error.carots[1] {
+                            for i in 0..=error.carots[1] {
                                 if i < error.carots[0] {
-                                    fmt.eprintf("\x1b[31m{}\x1b[0m", " ")
+                                    fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m", " ")
                                 } else {
-                                    fmt.eprintf("\x1b[31m{}\x1b[0m", "^")
+                                    fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m", "^")
                                 }
                             }
-                            fmt.printf("\n")
-                        } // Handle suggestions
-                        error = Error{}
+                            fmt.sbprintf(&builder, "\n")
+
+                        } else if strings.contains(compiler_output_lines[i], "Suggestion:") {
+                            parse_suggestions = true
+
+                        } else if parse_suggestions {
+                            for strings.index(compiler_output_lines[i + line_offeset], ":/") != 1 {
+                                append(&error.suggestions, strings.trim_left_space(compiler_output_lines[i + line_offeset]))
+                                line_offeset += 1
+                            }
+
+                            for suggestion in error.suggestions {
+                                fmt.sbprintf(&builder, "\x1b[33m{}\x1b[0m", suggestion)
+                            }
+
+                            fmt.sbprintf(&builder, "\n\n")
+                            clear(&error.suggestions)
+                            parse_suggestions = false
+                        }
                     }
 
-                    // for line in strings.split(compiler_output, "\n") {
-                    //     // fmt.printf("\x1b[31m{}\x1b[0m\n", line)
-                    //
-                    //     if strings.index(line, ":/") == 1 {
-                    //         error.coordinates = [2]int{strings.index_any(line, "(") + 1, strings.index_any(line, ")")}
-                    //         if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
-                    //             coordinates_pair := line[error.coordinates[0] : error.coordinates[1]]
-                    //             coordinates := strings.split(coordinates_pair , ":")
-                    //
-                    //             if len(coordinates) == 2 {
-                    //                 error.row = strconv.atoi(coordinates[0])
-                    //                 error.column = strconv.atoi(coordinates[1])
-                    //                 fmt.printf("\x1b[31mRow: {}, Column: {}\x1b[0m\n", error.row, error.column)
-                    //             }
-                    //
-                    //             error.message = strings.trim_left_space(line[error.coordinates[1] + 1:])
-                    //             fmt.printf("\x1b[31m{}\x1b[0m\n", error.message)
-                    //         }
-                    //
-                    //         process_suggestions = false
-                    //         continue
-                    //     }
-                    //
-                    //     // Check if the line contains the snippet (line after the error message)
-                    //     if error.message != "" && error.snippet == "" && strings.trim_left_space(line) != "" {
-                    //         error.snippet = strings.trim_left_space(line)
-                    //         fmt.printf("\x1b[31m{}\x1b[0m\n", error.snippet)
-                    //         continue
-                    //     }
-                    //
-                    //     // Check if the line contains the underline (line after the snippet)
-                    //     // TODO: If we want to put the row before the snippet we need to account for the length of the row and the formatting.
-                    //     if error.snippet != "" && strings.index_any(line, "^~") != -1 {
-                    //         error.carots[0] = strings.index_any(line, "^~") - 1
-                    //         error.carots[1] = strings.last_index_any(line, "^~")
-                    //         // fmt.printf("\x1b[31mUnderline positions: {} to {}\x1b[0m\n", error.carots[0], error.carots[1])
-                    //         for i in 0..<error.carots[1] {
-                    //             if i < error.carots[0] {
-                    //                 fmt.eprintf("\x1b[31m{}\x1b[0m", " ")
-                    //             } else {
-                    //                 fmt.eprintf("\x1b[31m{}\x1b[0m", "^")
-                    //             }
-                    //         }
-                    //         fmt.printf("\n")
-                    //         continue
-                    //     }
-                    //
-                    //     // Check if the line contains suggestions
-                    //     if strings.contains(line, "Suggestion:") {
-                    //         process_suggestions = true
-                    //         continue
-                    //     }
-                    //
-                    //     if process_suggestions == true {
-                    //         if strings.index(line, ":/") == 1 {
-                    //             process_suggestions = false
-                    //             fmt.printf("\x1b[31mSuggestion: {}\x1b[0m\n", error.suggestions)
-                    //         } else {
-                    //             suggestion := strings.trim_left_space(line)
-                    //             append(&error.suggestions, suggestion)
-                    //             continue
-                    //         }
-                    //     }
-                    //     error = Error{}
-                    // }
-
+                    fmt.eprintf("\x1b[31m{}\x1b[0m\n", strings.to_string(builder))
                     strings.builder_reset(&builder)
+
+                    error = Error{}
 
                     // compilation_output := string(compilation_output_buffer[:bytes_read])
                     // for line in strings.split_by_byte_iterator(&compilation_output, '\n') {
