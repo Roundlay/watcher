@@ -445,6 +445,8 @@ main :: proc() {
                 windows.CloseHandle(metadata.process_information.hThread)
                 windows.CloseHandle(metadata.error_write_handle)
 
+                row_column_separator := ":"
+                line_code_separator := " | "
                 compiler_output : string
                 parse_suggestions := false
                 line_offeset := 0
@@ -456,15 +458,19 @@ main :: proc() {
                     }
 
                     compiler_output = cast(string)compilation_output_buffer[:bytes_read]
-                    fmt.printf("\x1b[34m{}\x1b[0m", compiler_output)
                     compiler_output_lines := strings.split(compiler_output, "\n")
 
                     for i := 0; i <= len(compiler_output_lines) - 1; i += 1 {
                         if strings.index(compiler_output_lines[i], ":/") == 1 {
-                            // TODO: Make sure we group the compiler errors by filepath so we don't have to display the filepath for every error.
-                            // TODO: Could also just display .../file.odin for each file.
-                            // .../main.odin (1:2) - error: expected 'main' to be declared in this file
+                            // error.filepath = strings.cut(compiler_output_lines[i], 0, strings.index(compiler_output_lines[i], "("))
                             error.filepath = strings.cut(compiler_output_lines[i], 0, strings.index(compiler_output_lines[i], "("))
+                            segments := strings.split(error.filepath, "/")
+                            short_filepath : string
+                            if len(segments) > 2 {
+                                short_filepath = strings.join(segments[len(segments)-3:], "/")
+                            } else {
+                                short_filepath = error.filepath
+                            }
 
                             error.coordinates = {strings.index_any(compiler_output_lines[i], "(") + 1, strings.index_any(compiler_output_lines[i], ")")}
                             if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
@@ -476,18 +482,18 @@ main :: proc() {
                                     error.column = strconv.atoi(coordinates[1])
                                 }
                             }
+                            fmt.sbprintf(&builder, "\x1b[31m.../{}\x1b[0m\n", short_filepath)
 
                             error.message = strings.trim_left_space(compiler_output_lines[i][error.coordinates[1] + 1:])
                             fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.message)
 
                             error.snippet = strings.trim_left_space(compiler_output_lines[i + 1])
-                            fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.snippet)
-                            // row_column_separator := ":"
-                            // line_code_separator := " | "
-                            // fmt.sbprintf(&builder, "\x1b[31m{}{}{}{}{}\x1b[0m\n", error.row, row_column_separator, error.column, line_code_separator, error.snippet)
+                            // fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.snippet)
+                            fmt.sbprintf(&builder, "\x1b[31m{}{}{}{}{}\x1b[0m\n", error.row, row_column_separator, error.column, line_code_separator, error.snippet)
+                            // same but black background with white text
 
-                            error.carots[0] = strings.index_any(compiler_output_lines[i + 2], "^") - 1
-                            error.carots[1] = strings.last_index_any(compiler_output_lines[i + 2], "^") - 1
+                            error.carots[0] = strings.index_any(compiler_output_lines[i + 2], "^") - 1 + len(line_code_separator) + len(row_column_separator) + len(coordinates[0]) + len(coordinates[1])
+                            error.carots[1] = strings.last_index_any(compiler_output_lines[i + 2], "^") - 1 + len(line_code_separator) + len(row_column_separator) + len(coordinates[0]) + len(coordinates[1])
 
                             for i in 0..=error.carots[1] {
                                 if i < error.carots[0] {
