@@ -9,16 +9,22 @@ import "core:strconv"
 import "core:sys/windows"
 import "core:runtime"
 
+ANSI_OPEN :: "\x1b["
 ANSI_RESET :: "\x1b[0m"
 ANSI_CLEAR :: "\x1b[2J"
 ANSI_HOME  :: "\x1b[H"
+
+ANSI_032C :: "38;2;237;41;57m"
+ANSI_CANDIED_GINGER :: "38;2;191;163;135m"
+ANSI_PERSIAN_ORANGE :: "38;2;197;141;101m"
+
 BLOCKING    :: windows.INFINITE
 NON_BLOCKING :: windows.DWORD(0)
+
 PROCESS_COMPLETED :: windows.WAIT_OBJECT_0
 PROCESS_RUNNING   :: windows.WAIT_TIMEOUT
 
-// This works, as far as I can tell, but I don't know how to verify that
-// everything is getting cleaned up yet.
+// This works, as far as I can tell, but I don't know how to verify that everything is getting cleaned up yet.
 should_terminate : bool = false
 signal_handler :: proc "stdcall" (signal_type: windows.DWORD) -> windows.BOOL {
     context = runtime.default_context()
@@ -80,6 +86,9 @@ main :: proc() {
         fmt.printf("DEBUG: Original input mode: %b\n", original_input_mode)
     }
 
+    // Enables UTF-8 output and input processing.
+    windows.SetConsoleOutputCP(windows.CP_UTF8)
+
     requested_output_mode : windows.DWORD = windows.ENABLE_WRAP_AT_EOL_OUTPUT | windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING | windows.ENABLE_PROCESSED_OUTPUT
     output_mode : windows.DWORD = original_output_mode | requested_output_mode
 
@@ -113,12 +122,8 @@ main :: proc() {
         fmt.eprintf("ERROR: `windows.GetConsoleScreenBufferInfo` failed: {}", windows.GetLastError())
         return
     }
-    fmt.printf("DEBUG: Screen Buffer Size: %d x %d\n", csbi.dwSize.X, csbi.dwSize.Y)
 
-    for i : i16 = 0; i < csbi.dwSize.X; i += 1 {
-        fmt.printf("-")
-    }
-    fmt.printf("\n")
+    fmt.printf("DEBUG: Screen Buffer Size: %d x %d\n", csbi.dwSize.X, csbi.dwSize.Y)
 
     // File System Watcher
 
@@ -231,6 +236,7 @@ main :: proc() {
 
     // Need to make sure the size of the buffer is pretty big if we want to start parsing and colouring the output.
     // 4096 supported about 76 lines of compiler output before it had to be resized.
+    // Can we get this small enough to fit in the cache?
     compilation_output_buffer := make([]u8, 4096 * 2)
     defer delete(compilation_output_buffer)
 
@@ -285,8 +291,6 @@ main :: proc() {
                     } else {
                         fmt.printf("%s", output_buffer[:bytes_read])
                     }
-                } else {
-                    fmt.eprintf("\x1b[31mERROR: ReadFile failed: {}\x1b[0m\n", last_error)
                 }
             }
 
@@ -407,7 +411,7 @@ main :: proc() {
             strings.builder_reset(&builder) // Ensure the builder is reset before use
             fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.exe", filepath, filename, filepath, filename[:len(filename)-5])
             command := strings.to_string(builder)
-            fmt.printf("\x1b[34mTEST: Built compilation command: {}\x1b[0m\n", command)
+            fmt.printf("\x1b[34mINFO: Built compilation command: {}\x1b[0m\n", command)
             strings.builder_reset(&builder)
 
             // Compile the modified file using the filepath and compilation command
@@ -421,7 +425,12 @@ main :: proc() {
             error: Error
             error.coordinates = {0, 0}
             error.carots = {0, 0}
-            coordinates : []string
+
+            row_column_separator := ":"
+            line_code_separator := " | "
+            compiler_output : string = ""
+            parse_suggestions : bool = false
+            line_offset := 0
 
             if !compiled {
                 defer {
@@ -445,11 +454,6 @@ main :: proc() {
                 windows.CloseHandle(metadata.process_information.hThread)
                 windows.CloseHandle(metadata.error_write_handle)
 
-                row_column_separator := ":"
-                line_code_separator := " | "
-                compiler_output : string
-                parse_suggestions := false
-                line_offeset := 0
 
                 for {
                     bytes_read: windows.DWORD
@@ -458,19 +462,20 @@ main :: proc() {
                     }
 
                     compiler_output = cast(string)compilation_output_buffer[:bytes_read]
+                    fmt.printf("\x1b[31m{}\x1b[0m\n", compiler_output)
                     compiler_output_lines := strings.split(compiler_output, "\n")
+
+                    coordinates : []string
 
                     for i := 0; i <= len(compiler_output_lines) - 1; i += 1 {
                         if strings.index(compiler_output_lines[i], ":/") == 1 {
-                            // error.filepath = strings.cut(compiler_output_lines[i], 0, strings.index(compiler_output_lines[i], "("))
                             error.filepath = strings.cut(compiler_output_lines[i], 0, strings.index(compiler_output_lines[i], "("))
-                            segments := strings.split(error.filepath, "/")
-                            short_filepath : string
-                            if len(segments) > 2 {
-                                short_filepath = strings.join(segments[len(segments)-3:], "/")
-                            } else {
-                                short_filepath = error.filepath
+                            filepath_segments := strings.split(error.filepath, "/")
+
+                            if len(filepath_segments) > 2 {
+                                error.filepath = strings.join(filepath_segments[len(filepath_segments) - 4:], "/")
                             }
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m.../{}\x1b[0m\n", error.filepath)
 
                             error.coordinates = {strings.index_any(compiler_output_lines[i], "(") + 1, strings.index_any(compiler_output_lines[i], ")")}
                             if error.coordinates[0] != -1 && error.coordinates[1] != -1 {
@@ -482,24 +487,43 @@ main :: proc() {
                                     error.column = strconv.atoi(coordinates[1])
                                 }
                             }
-                            fmt.sbprintf(&builder, "\x1b[31m.../{}\x1b[0m\n", short_filepath)
 
                             error.message = strings.trim_left_space(compiler_output_lines[i][error.coordinates[1] + 1:])
-                            fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.message)
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57;1m{}\x1b[0m\n", error.message)
 
                             error.snippet = strings.trim_left_space(compiler_output_lines[i + 1])
                             // fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m\n", error.snippet)
-                            fmt.sbprintf(&builder, "\x1b[31m{}{}{}{}{}\x1b[0m\n", error.row, row_column_separator, error.column, line_code_separator, error.snippet)
-                            // same but black background with white text
 
                             error.carots[0] = strings.index_any(compiler_output_lines[i + 2], "^") - 1 + len(line_code_separator) + len(row_column_separator) + len(coordinates[0]) + len(coordinates[1])
                             error.carots[1] = strings.last_index_any(compiler_output_lines[i + 2], "^") - 1 + len(line_code_separator) + len(row_column_separator) + len(coordinates[0]) + len(coordinates[1])
 
+                            // Highlight the error region in the snippet itself.
+
+                            // The exit code is left open because we don't know precisely where we'll start highlighting the error in the snippet.
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m\x1b[38;2;237;41;57m{}{}{}", error.row, row_column_separator, error.column, line_code_separator)
+                            for i in 0..<len(error.snippet) {
+                                character := cast(rune)error.snippet[i]
+                                if i == error.carots[0] - len(row_column_separator) - len(line_code_separator) - len(coordinates[0]) - len(coordinates[1]) {
+                                    // When we reach the start of the error we complete the exit code for normal text and start the inverted color effect.
+                                    fmt.sbprintf(&builder, "\x1b[0m\x1b[38;2;237;41;57m{}", character)
+                                } else if i == error.carots[1] - len(row_column_separator) - len(line_code_separator) - len(coordinates[0]) - len(coordinates[1]) {
+                                    // We close the inverted color effect and open the normal color effect exit code.
+                                    fmt.sbprintf(&builder, "{}\x1b[0m\x1b[38;2;237;41;57m", character)
+                                } else {
+                                    fmt.sbprint(&builder, character)
+                                }
+                            }
+
+                            // Finally we close the normal color effect exit code.
+                            fmt.sbprint(&builder, "\x1b[0m\n")
+                            // Render an underline with carots under the relevant part of the snippet.
+
+                            // fmt.sbprintf(&builder, "\x1b[31m{}{}{}{}{}\x1b[0m\n", error.row, row_column_separator, error.column, line_code_separator, error.snippet)
                             for i in 0..=error.carots[1] {
                                 if i < error.carots[0] {
-                                    fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m", " ")
+                                    fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", " ")
                                 } else {
-                                    fmt.sbprintf(&builder, "\x1b[31m{}\x1b[0m", "^")
+                                    fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", "^")
                                 }
                             }
                             fmt.sbprintf(&builder, "\n")
@@ -508,13 +532,15 @@ main :: proc() {
                             parse_suggestions = true
 
                         } else if parse_suggestions {
-                            for strings.index(compiler_output_lines[i + line_offeset], ":/") != 1 {
-                                append(&error.suggestions, strings.trim_left_space(compiler_output_lines[i + line_offeset]))
-                                line_offeset += 1
+                            for strings.index(compiler_output_lines[i + line_offset], ":/") != 1 {
+                                append(&error.suggestions, strings.trim_left_space(compiler_output_lines[i + line_offset]))
+                                line_offset += 1
                             }
 
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", "Suggestions: ")
+
                             for suggestion in error.suggestions {
-                                fmt.sbprintf(&builder, "\x1b[33m{}\x1b[0m", suggestion)
+                                fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", suggestion)
                             }
 
                             fmt.sbprintf(&builder, "\n\n")
@@ -528,12 +554,14 @@ main :: proc() {
 
                     error = Error{}
 
-                    // compilation_output := string(compilation_output_buffer[:bytes_read])
-                    // for line in strings.split_by_byte_iterator(&compilation_output, '\n') {
-                    //     fmt.eprintf("\x1b[33m{}\x1b[0m\n", line)
-                    // }
-
+                    /*
+                    compilation_output := string(compilation_output_buffer[:bytes_read])
+                    for line in strings.split_by_byte_iterator(&compilation_output, '\n') {
+                        fmt.eprintf("\x1b[33m{}\x1b[0m\n", line)
+                    }
                     // fmt.printf(string(compilation_output_buffer[:bytes_read]))
+                    */
+
                 }
                 
                 if windows.WaitForSingleObject(metadata.running_process, BLOCKING) != PROCESS_COMPLETED {
