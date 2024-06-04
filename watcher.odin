@@ -1,6 +1,6 @@
 // TODO: Need to implement queing system that can handle infinite loops and programs that open a window...
 
-package main
+package watcher
 
 import "core:os"
 import "core:fmt"
@@ -9,19 +9,20 @@ import "core:time"
 import "core:strings"
 import "core:runtime"
 import "core:strconv"
-import "core:math/rand"
 import "core:sys/windows"
 
+// import "core:math/rand"
+
 ANSI_OPEN :: "\x1b["
-ANSI_OPEN_RGB :: "\x1b[38;2;"
 ANSI_RESET :: "\x1b[0m"
 ANSI_CLEAR :: "\x1b[2J"
 ANSI_HOME  :: "\x1b[H"
 
 ANSI_032C :: "\x1b[38;2;237;41;57m"
 ANSI_032C_BOLD :: "\x1b[38;2;237;41;57;1m"
-ANSI_CANDIED_GINGER :: "191;163;135"
-ANSI_PERSIAN_ORANGE :: "197;141;101"
+ANSI_CANDIED_GINGER :: "\x1b[38;2;191;163;135m"
+ANSI_PERSIAN_ORANGE :: "\x1b[38;2;197;141;101m"
+ANSI_ANTIQUE_WHITE:: "\x1b[38;2;214;210;196m"
 
 BLOCKING    :: windows.INFINITE
 NON_BLOCKING :: windows.DWORD(0)
@@ -34,7 +35,7 @@ should_terminate : bool = false
 signal_handler :: proc "stdcall" (signal_type: windows.DWORD) -> windows.BOOL {
     context = runtime.default_context()
     if signal_type == windows.CTRL_C_EVENT {
-        fmt.printf("Received CTRL_C_EVENT siganl.\n")
+        fmt.printf("Received CTRL_C_EVENT signal\n")
         should_terminate = true
     }
     return windows.TRUE
@@ -212,29 +213,38 @@ main :: proc() {
         return
     }
 
-    // TODO - What's the point of putting all this in a struct?
+    // TODO: What's the point of putting all this in a struct?
+    // TOOD: Clean up the struct or throw it out.
     Metadata :: struct {
-        startup_information     : windows.STARTUPINFOW,
-        process_information     : windows.PROCESS_INFORMATION,
-        security_attributes     : windows.SECURITY_ATTRIBUTES,
-        running_process         : windows.HANDLE,
+        // startup_information     : windows.STARTUPINFOW,
+        // process_information     : windows.PROCESS_INFORMATION,
+        // security_attributes     : windows.SECURITY_ATTRIBUTES,
+        // running_process         : windows.HANDLE,
         output_read_handle      : windows.HANDLE,
         output_write_handle     : windows.HANDLE,
         error_read_handle       : windows.HANDLE,
         error_write_handle      : windows.HANDLE,
-        creation_flags          : windows.DWORD,
+        // creation_flags          : windows.DWORD,
         exit_code               : windows.DWORD,
         process_name            : windows.wstring,
     }
 
     metadata := Metadata {}
 
-    metadata.startup_information.dwFlags        = windows.STARTF_USESTDHANDLES
-    metadata.startup_information.hStdOutput     = windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
-    metadata.startup_information.hStdError      = windows.GetStdHandle(windows.STD_ERROR_HANDLE)
-    metadata.security_attributes.bInheritHandle = windows.TRUE
-    metadata.security_attributes.nLength        = size_of(windows.SECURITY_ATTRIBUTES)
-    metadata.creation_flags = windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT
+    startup_information : windows.STARTUPINFOW
+    startup_information.dwFlags = windows.STARTF_USESTDHANDLES
+    startup_information.hStdOutput = windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
+    startup_information.hStdError = windows.GetStdHandle(windows.STD_ERROR_HANDLE)
+
+    process_information : windows.PROCESS_INFORMATION
+
+    creation_flags : windows.DWORD = windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT
+
+    security_attributes : windows.SECURITY_ATTRIBUTES
+    security_attributes.bInheritHandle = windows.TRUE
+    security_attributes.nLength = size_of(windows.SECURITY_ATTRIBUTES)
+
+    running_process : windows.HANDLE
 
     process_output_overlapped := new(windows.OVERLAPPED)
     process_output_overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
@@ -266,9 +276,9 @@ main :: proc() {
             }
 
             // TODO: Close the process handle and terminate the process if it's still running
-            if metadata.running_process != windows.INVALID_HANDLE_VALUE {
-                windows.TerminateProcess(metadata.running_process, 1)
-                windows.CloseHandle(metadata.running_process)
+            if running_process != windows.INVALID_HANDLE_VALUE {
+                windows.TerminateProcess(running_process, 1)
+                windows.CloseHandle(running_process)
             }
 
             break
@@ -299,9 +309,9 @@ main :: proc() {
                 }
             }
 
-            status_of_running_process := windows.WaitForSingleObject(metadata.running_process, 0)
+            status_of_running_process := windows.WaitForSingleObject(running_process, 0)
             if status_of_running_process == PROCESS_COMPLETED {
-                if windows.GetExitCodeProcess(metadata.running_process, &metadata.exit_code) {
+                if windows.GetExitCodeProcess(running_process, &metadata.exit_code) {
                     if metadata.exit_code == 0 {
                         fmt.printf("\x1b[32mINFO: Process execution completed successfully in {} ms.\x1b[0m\n", time.tick_since(timer))
                     } else {
@@ -311,8 +321,8 @@ main :: proc() {
                     fmt.eprintf("\x1b[31mERROR: Failed to get exit code for process: %d\x1b[0m\n\n", windows.GetLastError())
                 }
 
-                metadata.process_information.hProcess = nil
-                metadata.process_information.hThread = nil
+                process_information.hProcess = nil
+                process_information.hThread = nil
                 metadata.output_read_handle = nil
                 metadata.error_read_handle = nil
 
@@ -328,7 +338,7 @@ main :: proc() {
                 fmt.eprintf("\x1b[31mERROR: Failed to reset input console mode: {}\x1b[0m\n", windows.GetLastError())
             }
 
-            // Reset colours.
+            // Reset colours when we switch back to the console
             fmt.printf("%s", ANSI_RESET)
         }
 
@@ -347,7 +357,7 @@ main :: proc() {
             }
         } else {
             // TODO: You should probably just put everything that follows in here?
-            // Else file event detected.
+            // Else file event detected
             // fmt.printf("\x1b[32mINFO: Event detected.\x1b[0m\n")
         }
 
@@ -404,10 +414,10 @@ main :: proc() {
 
         if queue_command {
 
-            if metadata.running_process != windows.INVALID_HANDLE_VALUE {
-                windows.TerminateProcess(metadata.running_process, 1)
-                windows.CloseHandle(metadata.running_process)
-                metadata.running_process = windows.INVALID_HANDLE_VALUE
+            if running_process != windows.INVALID_HANDLE_VALUE {
+                windows.TerminateProcess(running_process, 1)
+                windows.CloseHandle(running_process)
+                running_process = windows.INVALID_HANDLE_VALUE
             }
 
             compiled, executing = false, false
@@ -441,28 +451,29 @@ main :: proc() {
             line_code_separator := " | "
 
             parse_multiline_suggestions : bool = false
+
             line_offset := 0
 
             if !compiled {
                 defer {
                     windows.CloseHandle(metadata.error_write_handle)
                     windows.CloseHandle(metadata.error_read_handle)
-                    windows.CloseHandle(metadata.running_process)
+                    windows.CloseHandle(running_process)
                 }
 
-                if !windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &metadata.security_attributes, 0) {
+                if !windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &security_attributes, 0) {
                     fmt.eprintf("\x1b[31mERROR: CreatePipe failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
-                metadata.startup_information.hStdError = metadata.error_write_handle
+                startup_information.hStdError = metadata.error_write_handle
 
                 timer = time.tick_now()
-                if !windows.CreateProcessW(nil, windows.utf8_to_wstring(command), nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
+                if !windows.CreateProcessW(nil, windows.utf8_to_wstring(command), nil, nil, windows.TRUE, creation_flags, nil, nil, &startup_information, &process_information) {
                         fmt.eprintf("\x1b[31mERROR: CreateProcessW failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
-                metadata.running_process = metadata.process_information.hProcess
-                windows.CloseHandle(metadata.process_information.hThread)
+                running_process = process_information.hProcess
+                windows.CloseHandle(process_information.hThread)
                 windows.CloseHandle(metadata.error_write_handle)
 
 
@@ -474,6 +485,7 @@ main :: proc() {
 
                     compiler_output = cast(string)compilation_output_buffer[:bytes_read]
                     compiler_output_lines := strings.split(compiler_output, "\n")
+                    fmt.printf("{}", compiler_output)
                     coordinates : []string
 
                     fmt.sbprint(&builder, "\n")
@@ -482,7 +494,7 @@ main :: proc() {
                         if strings.index(compiler_output_lines[i], ":/") == 1 {
                             filepath_segments := strings.split(strings.cut(compiler_output_lines[i], 0, strings.index(compiler_output_lines[i], "(")), "/")
                             error.filepath = strings.join(filepath_segments[len(filepath_segments) - 4:], "/")
-                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m.../{}\x1b[0m\n", error.filepath)
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;237;237m.../{}\x1b[0m\n", error.filepath)
 
                             error.coordinates = {strings.index_any(compiler_output_lines[i], "(") + 1, strings.index_any(compiler_output_lines[i], ")")}
                             coordinates = strings.split(compiler_output_lines[i][error.coordinates[0] : error.coordinates[1]], ":")
@@ -490,7 +502,8 @@ main :: proc() {
                             error.column = strconv.atoi(coordinates[1])
 
                             error.message = strings.trim_left_space(compiler_output_lines[i][error.coordinates[1] + 1:])
-                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m\n", error.message)
+                            // fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m\n", error.message)
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;237;237;1m{}\x1b[0m\n", error.message)
 
                             error.snippet = strings.trim_left_space(compiler_output_lines[i + 1])
 
@@ -500,7 +513,9 @@ main :: proc() {
                             // Highlight the error region in the snippet itself.
 
                             // The exit code is left open because we don't know precisely where we'll start highlighting the error in the snippet.
-                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57;1m{}\x1b[0m\x1b[38;2;237;41;57m{}{}{}", error.row, row_column_separator, error.column, line_code_separator)
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;237;237;1m{}\x1b[0m\x1b[38;2;237;237;237m{}{}{}", error.row, row_column_separator, error.column, line_code_separator)
+
+                            // Tried adding random colours to the row and column numbers to make errors more distinguishable.
 
                             // random_red := rand.uint32() % 255
                             // random_green := rand.uint32() % 255
@@ -511,11 +526,11 @@ main :: proc() {
                                 character := cast(rune)error.snippet[i]
                                 if i == error.carots[0] - len(row_column_separator) - len(line_code_separator) - len(coordinates[0]) - len(coordinates[1]) {
                                     // When we reach the start of the error we complete the exit code for normal text and start the inverted color effect.
-                                    fmt.sbprintf(&builder, "\x1b[0m\x1b[38;2;237;41;57m{}", character)
+                                    fmt.sbprintf(&builder, "\x1b[0m\x1b[38;2;237;237;237m{}", character)
 
                                 } else if i == error.carots[1] - len(row_column_separator) - len(line_code_separator) - len(coordinates[0]) - len(coordinates[1]) {
                                     // We close the inverted color effect and open the normal color effect exit code.
-                                    fmt.sbprintf(&builder, "{}\x1b[0m\x1b[38;2;237;41;57m", character)
+                                    fmt.sbprintf(&builder, "{}\x1b[0m\x1b[38;2;237;237;237m", character)
                                 } else {
                                     fmt.sbprint(&builder, character)
                                 }
@@ -531,23 +546,36 @@ main :: proc() {
                                     fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", "⠉")
                                 }
                             }
+
                             fmt.sbprintf(&builder, "\n")
 
-                        } else if strings.contains(compiler_output_lines[i], "Suggestion: Did you mean?") {
+                        } else if strings.contains(compiler_output_lines[i], "Suggestion") && !strings.contains_any(compiler_output_lines[i], "?") {
+                            fmt.sbprintf(&builder, "\x1b[38;2;237;237;237m{}\x1b[0m\n\n", strings.trim_left_space(compiler_output_lines[i]))
+
+                        } else if strings.contains(compiler_output_lines[i], "Suggestion") && strings.contains_any(compiler_output_lines[i], "?") {
                             parse_multiline_suggestions = true
-                        } else if strings.contains(compiler_output_lines[i], "Suggestion: Did you mean ") {
-                            // Parse a single-line suggestion
-                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m\n\n", strings.trim_left_space(compiler_output_lines[i]))
+                            line_offset = 0
+
+                        // * TODO: This isn't working. This correctly handles the suggestions in the first error, but errors that follow don't have their suggestions parsed. Instead, all we see is 'Suggestions: ' then nothing.
                         } else if parse_multiline_suggestions {
-                            for strings.index(compiler_output_lines[i + line_offset], ":/") != 1 {
+                            for i + line_offset < len(compiler_output_lines) && strings.index(compiler_output_lines[i + line_offset], ":/") != 1 {
                                 append(&error.suggestions, strings.trim_left_space(compiler_output_lines[i + line_offset]))
                                 line_offset += 1
                             }
 
-                            fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", "Suggestions: ")
+                            fmt.sbprintf(&builder, "{}Suggestions: \x1b[0m", "\x1b[38;2;255;255;255m")
 
+                            // We start with a suggestion line length of 13 because that's the length of the "Suggestions: " string.
+                            suggestion_line_length := 13
                             for suggestion in error.suggestions {
-                                fmt.sbprintf(&builder, "\x1b[38;2;237;41;57m{}\x1b[0m", suggestion)
+                                if suggestion_line_length + len(suggestion) >= 80 {
+                                    fmt.sbprintf(&builder, "{}{}\x1b[0m\n", "\x1b[38;2;255;255;255m", suggestion)
+                                    suggestion_line_length = 0
+                                } else {
+                                    fmt.sbprintf(&builder, "{}{}\x1b[0m", "\x1b[38;2;255;255;255m", suggestion)
+                                    suggestion_line_length += len(suggestion) + 1
+                                }
+                                fmt.sbprint(&builder, "\x1b[0m")
                             }
 
                             fmt.sbprintf(&builder, "\n\n")
@@ -571,12 +599,12 @@ main :: proc() {
 
                 }
                 
-                if windows.WaitForSingleObject(metadata.running_process, BLOCKING) != PROCESS_COMPLETED {
+                if windows.WaitForSingleObject(running_process, BLOCKING) != PROCESS_COMPLETED {
                     fmt.eprintf("\x1b[31mERROR: WaitForSingleObject (PROCESS_COMPLETED) failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
                 
-                if !windows.GetExitCodeProcess(metadata.running_process, &metadata.exit_code) {
+                if !windows.GetExitCodeProcess(running_process, &metadata.exit_code) {
                     fmt.eprintf("\x1b[31mERROR: GetExitCodeProcess failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                 } else if metadata.exit_code == 0 {
                     compiled = true  
@@ -594,19 +622,19 @@ main :: proc() {
                 metadata.process_name = windows.utf8_to_wstring(process_name)
                 fmt.printf("\x1b[34mINFO: Attempting to run process: %s\x1b[0m\n", process_name)
 
-                if windows.CreatePipe(&metadata.output_read_handle, &metadata.output_write_handle, &metadata.security_attributes, 0) {
-                    metadata.startup_information.hStdOutput = metadata.output_write_handle
+                if windows.CreatePipe(&metadata.output_read_handle, &metadata.output_write_handle, &security_attributes, 0) {
+                    startup_information.hStdOutput = metadata.output_write_handle
                 }
 
-                if windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &metadata.security_attributes, 0) {
-                    metadata.startup_information.hStdError = metadata.error_write_handle
+                if windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &security_attributes, 0) {
+                    startup_information.hStdError = metadata.error_write_handle
                 }
 
                 timer = time.tick_now()
-                if windows.CreateProcessW(nil, metadata.process_name, nil, nil, windows.TRUE, metadata.creation_flags, nil, nil, &metadata.startup_information, &metadata.process_information) {
+                if windows.CreateProcessW(nil, metadata.process_name, nil, nil, windows.TRUE, creation_flags, nil, nil, &startup_information, &process_information) {
                     executing = true
                     fmt.printf("\x1b[34mINFO: Running process: %s\x1b[0m\n", process_name)
-                    metadata.running_process = metadata.process_information.hProcess
+                    running_process = process_information.hProcess
 
                     // The child process (the compiled binary we execute here) inherits the write
                     // ends of the pipes (output_write_handle, error_write_handle). We close these
@@ -618,7 +646,7 @@ main :: proc() {
                     windows.CloseHandle(metadata.error_write_handle)
 
                     // Cleanup child process thread handle
-                    windows.CloseHandle(metadata.process_information.hThread) 
+                    windows.CloseHandle(process_information.hThread) 
                 }
             }
             queue_command = false
