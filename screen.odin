@@ -1,4 +1,4 @@
-package main
+package watcher
 
 import "core:runtime"
 import "core:fmt"
