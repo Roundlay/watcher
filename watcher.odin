@@ -7,10 +7,9 @@ import "core:fmt"
 import "core:mem"
 import "core:time"
 import "core:strings"
-import "core:runtime"
+import "base:runtime"
 import "core:strconv"
 import "core:sys/windows"
-
 // import "core:math/rand"
 
 ANSI_OPEN :: "\x1b["
@@ -30,7 +29,7 @@ NON_BLOCKING :: windows.DWORD(0)
 PROCESS_COMPLETED :: windows.WAIT_OBJECT_0
 PROCESS_RUNNING   :: windows.WAIT_TIMEOUT
 
-// This works, as far as I can tell, but I don't know how to verify that everything is getting cleaned up yet.
+// TODO: Verify that everything is terminated properly.
 should_terminate : bool = false
 signal_handler :: proc "stdcall" (signal_type: windows.DWORD) -> windows.BOOL {
     context = runtime.default_context()
@@ -97,7 +96,6 @@ main :: proc() {
 
     requested_output_mode : windows.DWORD = windows.ENABLE_WRAP_AT_EOL_OUTPUT | windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING | windows.ENABLE_PROCESSED_OUTPUT
     output_mode : windows.DWORD = original_output_mode | requested_output_mode
-
     if !windows.SetConsoleMode(h_out, output_mode) {
         // We failed to set both modes, try to step down mode gracefully.
         output_mode = original_output_mode | requested_output_mode
@@ -113,7 +111,6 @@ main :: proc() {
 
     requested_input_mode : windows.DWORD = windows.ENABLE_ECHO_INPUT | windows.ENABLE_LINE_INPUT | windows.ENABLE_WINDOW_INPUT | windows.ENABLE_PROCESSED_INPUT | windows.ENABLE_VIRTUAL_TERMINAL_INPUT
     input_mode  : windows.DWORD = original_input_mode  | requested_input_mode
-
     if !windows.SetConsoleMode(h_in, input_mode) {
         fmt.eprintf("ERROR: `windows.SetConsoleMode` failed for standard in: {}", windows.GetLastError())
         fmt.eprintf("Failed to set any VT mode, can't do anything here.")
@@ -123,19 +120,25 @@ main :: proc() {
     }
 
     // Get console screen buffer info.
-    csbi : windows.CONSOLE_SCREEN_BUFFER_INFO
-    if !windows.GetConsoleScreenBufferInfo(h_out, &csbi) {
-        fmt.eprintf("ERROR: `windows.GetConsoleScreenBufferInfo` failed: {}", windows.GetLastError())
-        return
-    }
-
-    fmt.printf("DEBUG: Screen Buffer Size: %d x %d\n", csbi.dwSize.X, csbi.dwSize.Y)
+    // csbi : windows.CONSOLE_SCREEN_BUFFER_INFO
+    // if !windows.GetConsoleScreenBufferInfo(h_out, &csbi) {
+    //     fmt.eprintf("ERROR: `windows.GetConsoleScreenBufferInfo` failed: {}", windows.GetLastError())
+    //     return
+    // }
+    // fmt.printf("DEBUG: Screen Buffer Size: %d x %d\n", csbi.dwSize.X, csbi.dwSize.Y)
 
     // File System Watcher
+    // -------------------------------------------------------------------------
 
     windows.SetConsoleCtrlHandler(signal_handler, windows.TRUE)
 
-    io_completion_port_handle := windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, nil, nil, 1)
+    // NOTE: When creating an I/O completion port without associating it with a
+    // file handle (i.e. by passing `windows.INVALID_HANDLE_VALUE` as the first
+    // argument) the completion key is ignored, so we use 0 for the completion
+    // key value for simplicity.
+
+    null_completion_key : uint = 0
+    io_completion_port_handle := windows.CreateIoCompletionPort(windows.INVALID_HANDLE_VALUE, nil, null_completion_key, 1)
     if io_completion_port_handle == windows.INVALID_HANDLE_VALUE do return
     defer windows.CloseHandle(io_completion_port_handle)
 
@@ -160,10 +163,10 @@ main :: proc() {
             return
         }
 
-        watched_directory = windows.utf8_to_wstring(os.args[1])
-        fmt.printf("INFO: Watching user defined directory: {}\n", os.args[1])
+        watched_directory = windows.utf8_to_wstring(command_line_argument)
+        fmt.printf("INFO: Watching user defined directory: {}\n", command_line_argument)
 
-        filepath = os.args[1]
+        filepath = command_line_argument
         if strings.has_prefix(filepath, "\\\\?\\") {
             filepath = filepath[4:]
             fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath)
@@ -187,24 +190,38 @@ main :: proc() {
 
     overlapped := new(windows.OVERLAPPED)
 
-    ids := make([dynamic][3]any)
-    id  := [3]any{overlapped, watched_directory_handle, watched_directory}
-    append(&ids, id)
+    // TODO: This `id` array is redundant if we're manually creating completion
+    // keys. Passing the pointer to the start of an array as the completion key
+    // might be useful later on if we decide to watch multiple directories at
+    // once or something. That's what the `id` array was originally for.
 
-    defer {
-        for id in ids {
-            windows.CloseHandle(id[1].(windows.HANDLE))
-            free(id[0].(^windows.OVERLAPPED))
-        }
-        delete(ids)
-    }
+    // ids := make([dynamic][3]any)
+    // id  := [3]any{overlapped, watched_directory_handle, watched_directory}
+    // append(&ids, id)
+    //
+    // defer {
+    //     for id in ids {
+    //         windows.CloseHandle(id[1].(windows.HANDLE))
+    //         free(id[0].(^windows.OVERLAPPED))
+    //     }
+    //     delete(ids)
+    // }
 
-    if windows.CreateIoCompletionPort(watched_directory_handle, io_completion_port_handle, cast(^uintptr)(&id), 1) == windows.INVALID_HANDLE_VALUE {
+    // [X] 2024/06/05: TODO: Why does this not work all of a sudden?
+    // NOTE: The CompletionKey argument required by CreateIoCompletionPort is
+    // essentially just that, some key that has some meaning to you that you can
+    // use to identify the completion port when you get a completion
+    // packet back. We can't direclty cast a windows.HANDLE typed variable
+    // to uint, so we have to cast it to uintptr first, and then cast it to uint
+    // in the function call.
+
+    completion_key := cast(uintptr)watched_directory_handle
+    if windows.CreateIoCompletionPort(watched_directory_handle, io_completion_port_handle, cast(uint)completion_key, 1) == windows.INVALID_HANDLE_VALUE {
         fmt.eprintf("`windows.CreateIoCompletionPort` has an invalid watched_directory_handle value: {}", windows.GetLastError())
         return
     }
 
-    // TODO - Document slash justify the choice of buffer size here. It was pulled out of thin air.
+    // TODO: Document slash justify slash test thie limits of the choice of buffer size here.
     buffer := make([]byte, 2048)
     defer delete(buffer)
 
@@ -220,11 +237,11 @@ main :: proc() {
         // process_information     : windows.PROCESS_INFORMATION,
         // security_attributes     : windows.SECURITY_ATTRIBUTES,
         // running_process         : windows.HANDLE,
+        // creation_flags          : windows.DWORD,
         output_read_handle      : windows.HANDLE,
         output_write_handle     : windows.HANDLE,
         error_read_handle       : windows.HANDLE,
         error_write_handle      : windows.HANDLE,
-        // creation_flags          : windows.DWORD,
         exit_code               : windows.DWORD,
         process_name            : windows.wstring,
     }
@@ -262,6 +279,7 @@ main :: proc() {
     timer : time.Tick
 
     for {
+        // Prevent the CPU from getting rustled.
         time.sleep(time.Millisecond * 1)
 
         if should_terminate {
@@ -284,9 +302,10 @@ main :: proc() {
             break
         }
 
-        if !windows.GetConsoleScreenBufferInfo(h_out, &csbi) {
-            fmt.eprintf("\x1b[31mERROR: `windows.GetConsoleScreenBufferInfo` failed: {}\x1b[0m\n", windows.GetLastError())
-        }
+        // In case we want to do anything relative to the console window size.
+        // if !windows.GetConsoleScreenBufferInfo(h_out, &csbi) {
+        //     fmt.eprintf("\x1b[31mERROR: `windows.GetConsoleScreenBufferInfo` failed: {}\x1b[0m\n", windows.GetLastError())
+        // }
 
         // TODO: Deal with programs that alter the console mode. We need to reset the console mode ourselves after every iteration through the file system watcher.
         if executing {
@@ -344,7 +363,10 @@ main :: proc() {
 
         number_of_bytes_transferred := windows.DWORD(0)
 
-        if windows.GetQueuedCompletionStatus(io_completion_port_handle, &number_of_bytes_transferred, cast(uintptr)(&id), &overlapped, NON_BLOCKING) == windows.BOOL(false) {
+
+        // TODO: Refactor this; we want to pass the same completion key that we create earlier if we can.
+        lp_completion_key : uint = 0
+        if windows.GetQueuedCompletionStatus(io_completion_port_handle, &number_of_bytes_transferred, &lp_completion_key, &overlapped, NON_BLOCKING) == windows.BOOL(false) {
             last_error := windows.GetLastError()
             switch last_error {
                 case PROCESS_RUNNING:
@@ -433,7 +455,6 @@ main :: proc() {
 
             // TODO: Can likely factor some of these out and just determine these on the fly, especially for coordinates and carots.
             // I.e. you have to create a separate coordinates variable later anyway.
-
             Error :: struct {
                 filepath, message, snippet, underline: string,
                 row, column : int,
@@ -442,17 +463,14 @@ main :: proc() {
             }
 
             error: Error
-            error.coordinates = {0, 0}
-            error.carots = {0, 0}
 
             compiler_output : string = ""
-
-            row_column_separator := ":"
-            line_code_separator := " | "
-
             parse_multiline_suggestions : bool = false
 
             line_offset := 0
+
+            row_column_separator := ":"
+            line_code_separator := " | "
 
             if !compiled {
                 defer {
@@ -485,7 +503,6 @@ main :: proc() {
 
                     compiler_output = cast(string)compilation_output_buffer[:bytes_read]
                     compiler_output_lines := strings.split(compiler_output, "\n")
-                    fmt.printf("{}", compiler_output)
                     coordinates : []string
 
                     fmt.sbprint(&builder, "\n")
