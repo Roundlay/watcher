@@ -190,7 +190,7 @@ main :: proc() {
 
     overlapped := new(windows.OVERLAPPED)
 
-    // TODO: This `id` array is redundant if we're manually creating completion
+    // NOTE: This `id` array is redundant if we're manually creating completion
     // keys. Passing the pointer to the start of an array as the completion key
     // might be useful later on if we decide to watch multiple directories at
     // once or something. That's what the `id` array was originally for.
@@ -207,7 +207,6 @@ main :: proc() {
     //     delete(ids)
     // }
 
-    // [X] 2024/06/05: TODO: Why does this not work all of a sudden?
     // NOTE: The CompletionKey argument required by CreateIoCompletionPort is
     // essentially just that, some key that has some meaning to you that you can
     // use to identify the completion port when you get a completion
@@ -230,41 +229,26 @@ main :: proc() {
         return
     }
 
-    // TODO: What's the point of putting all this in a struct?
-    // TOOD: Clean up the struct or throw it out.
-    Metadata :: struct {
-        // startup_information     : windows.STARTUPINFOW,
-        // process_information     : windows.PROCESS_INFORMATION,
-        // security_attributes     : windows.SECURITY_ATTRIBUTES,
-        // running_process         : windows.HANDLE,
-        // creation_flags          : windows.DWORD,
-        output_read_handle      : windows.HANDLE,
-        output_write_handle     : windows.HANDLE,
-        error_read_handle       : windows.HANDLE,
-        error_write_handle      : windows.HANDLE,
-        exit_code               : windows.DWORD,
-        process_name            : windows.wstring,
-    }
-
-    metadata := Metadata {}
-
     startup_information : windows.STARTUPINFOW
     startup_information.dwFlags = windows.STARTF_USESTDHANDLES
     startup_information.hStdOutput = windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
     startup_information.hStdError = windows.GetStdHandle(windows.STD_ERROR_HANDLE)
 
-    process_information : windows.PROCESS_INFORMATION
-
-    creation_flags : windows.DWORD = windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT
-
     security_attributes : windows.SECURITY_ATTRIBUTES
     security_attributes.bInheritHandle = windows.TRUE
     security_attributes.nLength = size_of(windows.SECURITY_ATTRIBUTES)
 
-    running_process : windows.HANDLE
+    output_read_handle, output_write_handle, error_read_handle, error_write_handle : windows.HANDLE
 
+    process_name : windows.wstring
+    running_process : windows.HANDLE
+    process_information : windows.PROCESS_INFORMATION
     process_output_overlapped := new(windows.OVERLAPPED)
     process_output_overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
+
+    creation_flags : windows.DWORD = windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT
+
+    exit_code : windows.DWORD
 
     // Need to make sure the size of the buffer is pretty big if we want to start parsing and colouring the output.
     // 4096 supported about 76 lines of compiler output before it had to be resized.
@@ -307,20 +291,19 @@ main :: proc() {
         //     fmt.eprintf("\x1b[31mERROR: `windows.GetConsoleScreenBufferInfo` failed: {}\x1b[0m\n", windows.GetLastError())
         // }
 
-        // TODO: Deal with programs that alter the console mode. We need to reset the console mode ourselves after every iteration through the file system watcher.
         if executing {
             bytes_read := windows.DWORD(0)
 
             output_buffer := make([]u8, 4096)
             defer delete(output_buffer)
 
-            read_success := windows.ReadFile(metadata.output_read_handle, &output_buffer[0], u32(len(output_buffer)), &bytes_read, process_output_overlapped)
+            read_success := windows.ReadFile(output_read_handle, &output_buffer[0], u32(len(output_buffer)), &bytes_read, process_output_overlapped)
             if read_success {
                 fmt.printf("%s", output_buffer[:bytes_read])
             } else {
                 last_error := windows.GetLastError()
                 if last_error == windows.ERROR_IO_PENDING {
-                    if !windows.GetOverlappedResult(metadata.output_read_handle, process_output_overlapped, &bytes_read, windows.TRUE) {
+                    if !windows.GetOverlappedResult(output_read_handle, process_output_overlapped, &bytes_read, windows.TRUE) {
                         fmt.eprintf("\x1b[31mERROR: GetOverlappedResult failed: {}\x1b[0m\n", windows.GetLastError())
                     } else {
                         fmt.printf("%s", output_buffer[:bytes_read])
@@ -330,11 +313,11 @@ main :: proc() {
 
             status_of_running_process := windows.WaitForSingleObject(running_process, 0)
             if status_of_running_process == PROCESS_COMPLETED {
-                if windows.GetExitCodeProcess(running_process, &metadata.exit_code) {
-                    if metadata.exit_code == 0 {
+                if windows.GetExitCodeProcess(running_process, &exit_code) {
+                    if exit_code == 0 {
                         fmt.printf("\x1b[32mINFO: Process execution completed successfully in {} ms.\x1b[0m\n", time.tick_since(timer))
                     } else {
-                        fmt.eprintf("\x1b[31mERROR: Process completed with non-zero exit code %d.\x1b[0m\n", metadata.exit_code)
+                        fmt.eprintf("\x1b[31mERROR: Process completed with non-zero exit code %d.\x1b[0m\n", exit_code)
                     }
                 } else {
                     fmt.eprintf("\x1b[31mERROR: Failed to get exit code for process: %d\x1b[0m\n\n", windows.GetLastError())
@@ -342,8 +325,8 @@ main :: proc() {
 
                 process_information.hProcess = nil
                 process_information.hThread = nil
-                metadata.output_read_handle = nil
-                metadata.error_read_handle = nil
+                output_read_handle = nil
+                error_read_handle = nil
 
                 executing = false
                 compiled = false
@@ -453,15 +436,12 @@ main :: proc() {
 
             // Compile the modified file using the filepath and compilation command
 
-            // TODO: Can likely factor some of these out and just determine these on the fly, especially for coordinates and carots.
-            // I.e. you have to create a separate coordinates variable later anyway.
             Error :: struct {
                 filepath, message, snippet, underline: string,
                 row, column : int,
                 coordinates, carots: [2]int,
                 suggestions : [dynamic]string,
             }
-
             error: Error
 
             compiler_output : string = ""
@@ -474,16 +454,16 @@ main :: proc() {
 
             if !compiled {
                 defer {
-                    windows.CloseHandle(metadata.error_write_handle)
-                    windows.CloseHandle(metadata.error_read_handle)
+                    windows.CloseHandle(error_write_handle)
+                    windows.CloseHandle(error_read_handle)
                     windows.CloseHandle(running_process)
                 }
 
-                if !windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &security_attributes, 0) {
+                if !windows.CreatePipe(&error_read_handle, &error_write_handle, &security_attributes, 0) {
                     fmt.eprintf("\x1b[31mERROR: CreatePipe failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
-                startup_information.hStdError = metadata.error_write_handle
+                startup_information.hStdError = error_write_handle
 
                 timer = time.tick_now()
                 if !windows.CreateProcessW(nil, windows.utf8_to_wstring(command), nil, nil, windows.TRUE, creation_flags, nil, nil, &startup_information, &process_information) {
@@ -492,12 +472,12 @@ main :: proc() {
                 }
                 running_process = process_information.hProcess
                 windows.CloseHandle(process_information.hThread)
-                windows.CloseHandle(metadata.error_write_handle)
+                windows.CloseHandle(error_write_handle)
 
 
                 for {
                     bytes_read: windows.DWORD
-                    if !windows.ReadFile(metadata.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
+                    if !windows.ReadFile(error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
                         break
                     }
 
@@ -533,7 +513,6 @@ main :: proc() {
                             fmt.sbprintf(&builder, "\x1b[38;2;237;237;237;1m{}\x1b[0m\x1b[38;2;237;237;237m{}{}{}", error.row, row_column_separator, error.column, line_code_separator)
 
                             // Tried adding random colours to the row and column numbers to make errors more distinguishable.
-
                             // random_red := rand.uint32() % 255
                             // random_green := rand.uint32() % 255
                             // random_blue := rand.uint32() % 255
@@ -586,7 +565,7 @@ main :: proc() {
                             suggestion_line_length := 13
                             for suggestion in error.suggestions {
                                 if suggestion_line_length + len(suggestion) >= 80 {
-                                    fmt.sbprintf(&builder, "{}{}\x1b[0m\n", "\x1b[38;2;255;255;255m", suggestion)
+                                    fmt.sbprintf(&builder, "{}{}\x1b[0m", "\x1b[38;2;255;255;255m", suggestion)
                                     suggestion_line_length = 0
                                 } else {
                                     fmt.sbprintf(&builder, "{}{}\x1b[0m", "\x1b[38;2;255;255;255m", suggestion)
@@ -621,12 +600,12 @@ main :: proc() {
                     break
                 }
                 
-                if !windows.GetExitCodeProcess(running_process, &metadata.exit_code) {
+                if !windows.GetExitCodeProcess(running_process, &exit_code) {
                     fmt.eprintf("\x1b[31mERROR: GetExitCodeProcess failed. Last error: {}\x1b[0m\n", windows.GetLastError())
-                } else if metadata.exit_code == 0 {
+                } else if exit_code == 0 {
                     compiled = true  
                 } else {
-                    fmt.printf("\x1b[31mERROR: Compilation failed after {} ms with exit code {}\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
+                    fmt.printf("\x1b[31mERROR: Compilation failed after {} ms with exit code {}\x1b[0m\n", time.tick_since(timer), exit_code)
                 }
             }
 
@@ -635,22 +614,22 @@ main :: proc() {
             if compiled && !executing {
                 strings.builder_reset(&builder) // Ensure the builder is reset before use
                 fmt.sbprintf(&builder, "{}\\{}.exe", filepath, filename[:len(filename)-5])
-                process_name := strings.to_string(builder)
-                metadata.process_name = windows.utf8_to_wstring(process_name)
-                fmt.printf("\x1b[34mINFO: Attempting to run process: %s\x1b[0m\n", process_name)
+                name := strings.to_string(builder)
+                process_name = windows.utf8_to_wstring(name)
+                fmt.printf("\x1b[34mINFO: Attempting to run process: %s\x1b[0m\n", name)
 
-                if windows.CreatePipe(&metadata.output_read_handle, &metadata.output_write_handle, &security_attributes, 0) {
-                    startup_information.hStdOutput = metadata.output_write_handle
+                if windows.CreatePipe(&output_read_handle, &output_write_handle, &security_attributes, 0) {
+                    startup_information.hStdOutput = output_write_handle
                 }
 
-                if windows.CreatePipe(&metadata.error_read_handle, &metadata.error_write_handle, &security_attributes, 0) {
-                    startup_information.hStdError = metadata.error_write_handle
+                if windows.CreatePipe(&error_read_handle, &error_write_handle, &security_attributes, 0) {
+                    startup_information.hStdError = error_write_handle
                 }
 
                 timer = time.tick_now()
-                if windows.CreateProcessW(nil, metadata.process_name, nil, nil, windows.TRUE, creation_flags, nil, nil, &startup_information, &process_information) {
+                if windows.CreateProcessW(nil, process_name, nil, nil, windows.TRUE, creation_flags, nil, nil, &startup_information, &process_information) {
                     executing = true
-                    fmt.printf("\x1b[34mINFO: Running process: %s\x1b[0m\n", process_name)
+                    fmt.printf("\x1b[34mINFO: Running process: %s\x1b[0m\n", name)
                     running_process = process_information.hProcess
 
                     // The child process (the compiled binary we execute here) inherits the write
@@ -659,8 +638,8 @@ main :: proc() {
                     // interfering with the child's ability to write to them.
 
                     // Cleanup write ends of pipes 
-                    windows.CloseHandle(metadata.output_write_handle)
-                    windows.CloseHandle(metadata.error_write_handle)
+                    windows.CloseHandle(output_write_handle)
+                    windows.CloseHandle(error_write_handle)
 
                     // Cleanup child process thread handle
                     windows.CloseHandle(process_information.hThread) 
@@ -671,7 +650,7 @@ main :: proc() {
 
         FSW_WATCHING_EVENTS : windows.DWORD : windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE
         if !windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, FSW_WATCHING_EVENTS, nil, overlapped, nil) {
-            fmt.eprintf("\x1b[31mERROR: ReadDirectoryChangesW failed!\x1b[0m\n", time.tick_since(timer), metadata.exit_code)
+            fmt.eprintf("\x1b[31mERROR: ReadDirectoryChangesW failed!\x1b[0m\n", time.tick_since(timer), exit_code)
         }
     }
 }
