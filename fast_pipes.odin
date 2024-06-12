@@ -1,3 +1,5 @@
+// NOTE: This doesn't do anything. This is just a test.
+
 package main
 
 import "core:sys/windows"
