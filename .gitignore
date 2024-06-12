@@ -11,5 +11,7 @@
 
 .env
 
+ols.json
+
 bin/
 /screen.odin # Temp
