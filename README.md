@@ -1,6 +1,6 @@
 A simple auto-compiler for the Odin programming language.
 
-Watcher implements a basic file-system watcher that looks for changes to Odin files (e.g. you saving your work). When a change is detected to any files with a `.odin` extension, the file is compiled and executed.
+Watcher implements a basic Win32 file-system watcher that looks for modifications to files with the `.odin` extension. When a change is detected, the program attempts to compile and execute the associated file. If compilation fails for some reason, the program displays some nicely formatted compiler warnings.
 
 **Command-line Launch Arguments**
 
