@@ -1,6 +1,3 @@
-// TODO: Implement queing system to prevent multiple events from being triggered while something is still running.
-// TODO: Add verbosity flag so we don't have to see the compilation command etc.
-
 package watcher
 
 import "core:os"
@@ -66,6 +63,8 @@ main :: proc() {
         }
     }
 
+    windows.SetConsoleCtrlHandler(signal_handler, windows.TRUE)
+
     // CONSOLE SETUP
 
     h_out := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
@@ -127,8 +126,6 @@ main :: proc() {
 
     // FILE SYSTEM WATCHER
 
-    windows.SetConsoleCtrlHandler(signal_handler, windows.TRUE)
-
     // NOTE: When creating an I/O completion port without associating it with a
     // file handle (i.e. by passing `windows.INVALID_HANDLE_VALUE` as the first
     // argument) the completion key is ignored, so it's okay to use `0` as the
@@ -142,62 +139,98 @@ main :: proc() {
     // NOTE: Make sure to pass the full file path to the Odin compiler, or the
     // file system watcher will look for events in its own directory.
 
-    // TODO: Implement existence check before watching user defined directory.
-    arguments := os.args 
-
     filepath : string
+
     watched_directory : windows.wstring 
 
     user_supplied_directory : string
     user_supplied_compilation_target : string
 
-    // NOTE: For now, assume the first argument is the optional directory
-    // to watch, and the second argument is the optional compilation target ID.
-    // E.g. `watcher "C:\Users\User\Project\src" js_wasm32`.
+    // TODO: Can you pull these from the Odin source folder?
+    compilation_targets : [24]string = {"darwin_amd64", "darwin_arm64", "essence_amd64", "linux_i386", "linux_amd64", "linux_arm64", "linux_arm32", "windows_i386", "windows_amd64", "freebsd_i386", "freebsd_amd64", "freebsd_arm64", "openbsd_amd64", "netbsd_amd64", "haiku_amd64", "freestanding_wasm32", "wasi_wasm32", "js_wasm32", "freestanding_wasm64p32", "js_wasm64p32", "wasi_wasm64p32", "freestanding_amd64_sysv", "freestanding_amd64_win64", "freestanding_arm64"}
 
-    // Skip the first argument, which is the executable name.
-    if len(os.args) > 1 {
-        // If the user provides a directory to watch...
-        if len(os.args) == 2 {
-            user_supplied_directory = os.args[1]
-        // If the user provides a directory to watch and a compilation target...
-        } else if len(arguments) == 3 {
-            user_supplied_directory = os.args[1]
-            user_supplied_compilation_target = os.args[2]
-        } else {
-            fmt.eprintln("\x1b[31mERROR: Too many arguments provided.\x1b[0m\n\n")
-            return
-        }
+    // Here the compilation targets array is converted into a map of
+    // key:value (string:bool) pairs. E.g. `map[js_wasm64p32=true, ...]`.
+    // All values are set to true now so that we can efficiently check
+    // if the user supplied compilation target is in the map.
 
-        file_info, file_info_error := os.lstat(user_supplied_directory)
+    target_map := make(map[string]bool)
+    defer delete(target_map)
+    for target, index in compilation_targets {
+        target_map[target] = true
+    }
 
-        if file_info_error != 0 {
-            fmt.eprintln("\x1b[31mERROR: Invalid directory:", user_supplied_directory, "\x1b[0m\n\n")
-            return
-        } else if !os.is_dir(file_info.fullpath) {
-            fmt.eprintln("\x1b[31mERROR: Not a directory:", user_supplied_directory, "\x1b[0m\n\n")
-            return
-        }
+    args := os._alloc_command_line_arguments()
+    defer delete(args)
 
-        watched_directory = windows.utf8_to_wstring(user_supplied_directory)
-        fmt.printf("\x1b[34mFACTS: Watching user defined directory: {}\x1b[0m\n", user_supplied_directory)
+    if len(args) > 1 {
+        for arg in args[1:] {
+            if strings.has_prefix(arg, "-watch:") || strings.has_prefix(arg, "--watch:") || strings.has_prefix(arg, "-w:") {
+                if arg[strings.index(arg, ":") + 1:] == "" {
+                    fmt.eprintln("\x1b[31mERROR: No watch directory provided.\x1b[0m\n\n")
+                    return
+                } else {
+                    user_supplied_directory = arg[strings.index(arg, ":") + 1:]
 
-        // "\\\\?\\" is a prefix that allows for long file paths. We strip it.
+                    file_info, file_info_error := os.lstat(user_supplied_directory)
 
-        filepath = user_supplied_directory
-        if strings.has_prefix(filepath, "\\\\?\\") {
-            filepath = filepath[4:]
-            fmt.printf("\x1b[34mFACTS: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath)
+                    if file_info_error != 0 {
+                        fmt.eprintln("\x1b[31mERROR: Invalid directory:", user_supplied_directory, "\x1b[0m")
+                        return
+                    } else if !os.is_dir(file_info.fullpath) {
+                        fmt.eprintln("\x1b[31mERROR: Not a directory:", user_supplied_directory, "\x1b[0m")
+                        return
+                    }
+
+                    watched_directory = windows.utf8_to_wstring(user_supplied_directory)
+                    fmt.printf("\x1b[34mINFO: Watching user defined directory: {}\x1b[0m\n", user_supplied_directory)
+
+                    filepath = user_supplied_directory
+                    if strings.has_prefix(filepath, "\\\\?\\") {
+                        filepath = filepath[4:]
+                        fmt.printf("\x1b[34mINFO: Stripped prefix from long-filepath: {}\x1b[0m\n", filepath)
+                    }
+                }
+            }
+
+            if strings.has_prefix(arg, "-target:") || strings.has_prefix(arg, "--target:") || strings.has_prefix(arg, "-t:") {
+                target := arg[strings.index(arg, ":") + 1:]
+                if target == "" {
+                    fmt.eprintln("\x1b[31mERROR: No compilation target supplied.\x1b[0m")
+                    return
+                }
+
+                _, exists := target_map[target]
+                if !exists {
+                    fmt.eprintln("\x1b[31mERROR: Not a valid compilation target:", target, "\x1b[0m")
+                    return
+                }
+
+                user_supplied_compilation_target = target
+                fmt.eprintln("\x1b[34mINFO: Compiling to target:", target, "\x1b[0m")
+            }
+
+            // TODO: Finish support for outnames.
+            // if strings.has_prefix(arg, "-out:") || strings.has_prefix(arg, "--out:") || strings.has_prefix(arg, "-o:") {
+            //     outname := arg[strings.index(arg, ":") + 1:]
+            //     if outname == "" {
+            //         fmt.eprintln("\x1b[31mERROR: No outname supplied.\x1b[0m")
+            //         return
+            //     }
+            //
+            //     user_supplied_compilation_target = target
+            //     fmt.eprintln("\x1b[34mINFO: Compiling to target:", target, "\x1b[0m")
+            // }
         }
     } else {
-        // No user directory, so watch the directory the executable is in.
+        // No user directory provided so watch the directory the executable is in.
         watched_directory = windows.utf8_to_wstring(os.get_current_directory())
-        fmt.println("\x1b[34mFACTS: Watching root directory:", os.get_current_directory(), "\x1b[0m")
+        fmt.println("\x1b[34mINFO: Watching root directory:", os.get_current_directory(), "\x1b[0m")
 
         filepath = os.get_current_directory()
         if strings.has_prefix(filepath, "\\\\?\\") {
             filepath = filepath[4:]
-            fmt.println("\x1b[34mFACTS: Stripped prefix from long-filepath:", filepath, "\x1b[0m")
+            fmt.println("\x1b[34mINFO: Stripped prefix from long-filepath:", filepath, "\x1b[0m")
         }
     }
 
@@ -334,7 +367,7 @@ main :: proc() {
             if status_of_running_process == PROCESS_COMPLETED {
                 if windows.GetExitCodeProcess(running_process, &exit_code) {
                     if exit_code == 0 {
-                        fmt.printf("\n\x1b[32mFACTS: Process execution completed successfully in {} ms.\x1b[0m\n", time.tick_since(timer))
+                        fmt.printf("\n\x1b[32mINFO: Process execution completed successfully in {} ms.\x1b[0m\n", time.tick_since(timer))
                     } else {
                         fmt.eprintf("\x1b[31mERROR: Process completed with non-zero exit code %d.\x1b[0m\n", exit_code)
                     }
@@ -464,19 +497,17 @@ main :: proc() {
             compiled, executing = false, false
 
             // TODO: Slapped together while I work on WASM projects. Need to add support for all compilation targets.
+            // TODO: Stop hardcoding compilation targets.
             strings.builder_reset(&builder)
-            if user_supplied_compilation_target != "js_wasm32" {
-                fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.exe", filepath, filename, filepath, filename[:len(filename)-5])
-            } else {
+            if user_supplied_compilation_target != "" && user_supplied_compilation_target == "js_wasm32" {
                 fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.wasm", filepath, filename, filepath, filename[:len(filename)-5])
-            }
-
-            if user_supplied_compilation_target != "" {
                 fmt.sbprintf(&builder, " -target:{}", user_supplied_compilation_target)
+            } else {
+                fmt.sbprintf(&builder, "odin build {}\\{} -file -out:{}\\{}.exe", filepath, filename, filepath, filename[:len(filename)-5])
             }
 
             command := strings.to_string(builder)
-            fmt.println("\x1b[34mFACTS: Built compilation command...\x1b[0m")
+            fmt.println("\x1b[34mINFO: Built compilation command...\x1b[0m")
             strings.builder_reset(&builder)
 
             // Compile the modified file using the filepath and compilation command
@@ -524,7 +555,7 @@ main :: proc() {
                     if !windows.ReadFile(error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
                         break
                     }
-                    fmt.printf("\x1b[34mFACTS: Bytes read: {}\x1b[0m\n", bytes_read)
+                    fmt.printf("\x1b[34mINFO: Bytes read: {}\x1b[0m\n", bytes_read)
 
                     // NOTE: This is the normal compiler output.
                     compiler_output := cast(string)compilation_output_buffer[:bytes_read]
@@ -659,8 +690,8 @@ main :: proc() {
                 fmt.sbprintf(&builder, "{}\\{}.exe", filepath, filename[:len(filename)-5])
                 name := strings.to_string(builder)
                 process_name = windows.utf8_to_wstring(name)
-                // fmt.printf("\x1b[34mFACTS: Attempting to run process: %s\x1b[0m\n", name)
-                fmt.println("\x1b[34mFACTS: Attempting to run process...\x1b[0m")
+                // fmt.printf("\x1b[34mINFO: Attempting to run process: %s\x1b[0m\n", name)
+                fmt.println("\x1b[34mINFO: Attempting to run process...\x1b[0m")
 
                 if windows.CreatePipe(&output_read_handle, &output_write_handle, &security_attributes, 0) {
                     startup_information.hStdOutput = output_write_handle
@@ -673,7 +704,7 @@ main :: proc() {
                 timer = time.tick_now()
                 if windows.CreateProcessW(nil, process_name, nil, nil, windows.TRUE, creation_flags, nil, nil, &startup_information, &process_information) {
                     executing = true
-                    fmt.println("\x1b[34mFACTS: Running process...\x1b[0m\n")
+                    fmt.println("\x1b[34mINFO: Running process...\x1b[0m\n")
                     running_process = process_information.hProcess
 
                     // The child process (the compiled binary we execute here) inherits the write
