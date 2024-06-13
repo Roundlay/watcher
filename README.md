@@ -20,5 +20,5 @@ Watch for changes in a specific directory:
 Watch for changes in a specific directory and compile to a specific compilation target:
 
 - `watcher -w:C:\Users\User\Projects\watch -t:js_wasm32`
-
-
+- - - - -
+![Screenshot (362)](https://github.com/Roundlay/watcher/assets/4133752/beeef4f6-0348-4e74-bef8-b9379c94ab60)
