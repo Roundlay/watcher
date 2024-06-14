@@ -1,6 +1,6 @@
 ### 𝐖𝐚𝐭𝐜𝐡𝐞𝐫: A simple file-system watcher and auto-compiler for the Odin programming language.
 
-𝐖𝐚𝐭𝐜𝐡𝐞𝐫 implements a basic Win32 file-system watcher that looks for and responds to modifications to `.odin` files in a specific directory. When such a an event is detected 𝐖𝐚𝐭𝐜𝐡𝐞𝐫 attempts to compile and execute the modified file. If the compilation or execution process fails, the program emits some nicely formatted error messages from the compiler. In principle, the tool can easily be extended to watch for changes to other event or file types.
+𝐖𝐚𝐭𝐜𝐡𝐞𝐫 implements a basic Win32 file-system watcher that looks for and responds to modifications to `.odin` files in a specific directory. When such an event is detected 𝐖𝐚𝐭𝐜𝐡𝐞𝐫 attempts to compile and execute the modified file. If the compilation or execution process fails, the program emits some nicely formatted error messages from the compiler. In principle, the tool can easily be extended to watch for changes to other event or file types.
 
 **Command-line Launch Arguments**
 
