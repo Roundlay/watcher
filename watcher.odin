@@ -812,7 +812,7 @@ main :: proc() {
 
         FSW_WATCHING_EVENTS : windows.DWORD : windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME  | windows.FILE_NOTIFY_CHANGE_LAST_WRITE
         if !windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, FSW_WATCHING_EVENTS, nil, overlapped, nil) {
-            fmt.eprintf("\x1b[31mERROR: ReadDirectoryChangesW failed!\x1b[0m\n", time.tick_since(timer), exit_code)
+            fmt.eprintf("\x1b[31mERROR: ReadDirectoryChangesW failed after {} ms with exit code {}!\x1b[0m\n", time.tick_since(timer), exit_code)
         }
     }
 }
