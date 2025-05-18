@@ -8,11 +8,9 @@ A file system watcher written in Odin.
 
 import "core:os"
 import "core:fmt"
-import "core:mem"
 import "core:time"
 import "core:strings"
 import "base:runtime"
-import "core:strconv"
 import "core:sys/windows"
 import "core:path/filepath"
 
@@ -148,11 +146,54 @@ initialise_console_state :: proc() -> ConsoleState {
 
 get_console_screen_buffer_dimensions :: proc(standard_output_handle: windows.HANDLE) -> (width: int, height: int) {
     console_screen_buffer_info : windows.CONSOLE_SCREEN_BUFFER_INFO
-    if !windows.GetConsoleScreenBufferInfo(standard_output_handle, &console_screen_buffer_info) {
-        return 0, 0
-    }
+    if !windows.GetConsoleScreenBufferInfo(standard_output_handle, &console_screen_buffer_info) do return 0, 0
     return int(console_screen_buffer_info.srWindow.Right - console_screen_buffer_info.srWindow.Left + 1), int(console_screen_buffer_info.srWindow.Bottom - console_screen_buffer_info.srWindow.Top + 1)
+}
 
+// TEMP
+
+StatusInfo :: struct {
+    file_path   : string,    // absolute or relative
+    modified    : bool,
+    cursor_line : int,       // 1‑based
+    cursor_col  : int,       // 1‑based (UTF‑8 code‑points, keep it simple)
+    total_lines : int,
+}
+
+// TEMP STATUS LINE
+
+build_status_line :: proc(s: StatusInfo, width: int) -> string {
+    mod_tag : string
+    if s.modified { mod_tag = "[+]" } else { mod_tag = "" }
+    file_name := filepath.base(s.file_path)
+
+    _string_builder : strings.Builder
+    strings.builder_init(&_string_builder)
+
+    // Core pieces; adjust or reorder to taste.
+    left  := fmt.sbprintf(&_string_builder, "%s %s", file_name, mod_tag)
+    pos   := fmt.sbprintf(&_string_builder, "Ln %d, Col %d", s.cursor_line, s.cursor_col)
+    ratio := fmt.sbprintf(&_string_builder, "%d/%d", s.cursor_line, s.total_lines)
+
+    // Assemble with two spaces as separators.
+    line := fmt.sbprintf(&_string_builder, "%s  %s  (%s)", left, ratio, pos)
+
+    // arena := strings.to_string(_string_builder)
+
+    // Padding / truncation.
+    runes := strings.rune_count(line)
+    switch {
+    case runes < width: // pad
+        pad := strings.repeat(" ", width - runes)
+        line_pad : []string = {line, pad}
+        line = strings.concatenate(line_pad)
+    case runes > width: // truncate and mark with ellipsis
+        // naïve rune‑slice; OK for ASCII‑heavy UI.
+        line_string := strings.to_string(_string_builder)
+        line = strings.cut(line_string, 0, width - 1)
+    }
+
+    return line
 }
 
 // TODO Does this even work? How do I prove it works?
@@ -210,7 +251,7 @@ main :: proc() {
     // NOTE: Make sure to pass the full file path to the Odin compiler, or the
     // file system watcher will look for events in its own directory.
 
-    watched_directory : windows.wstring 
+    // watched_directory : windows.wstring 
 
     ArgInfo :: struct {
         watch_directory         : string,
@@ -371,6 +412,7 @@ main :: proc() {
     io_state      := initialise_process_io_state()
 
     for {
+
         // prevent the cpu from getting rustled.
         time.sleep(time.Millisecond * 1)
 
@@ -406,7 +448,7 @@ main :: proc() {
             windows.ResetEvent(io_state.process_output_overlapped.hEvent)
 
             // fmt.printf("\x1b[36mDEBUG: Polling output...\x1b[0m\n")
-            
+
             // Read stdout using the overlapped structure.
             read_success := windows.ReadFile(io_state.output_read_handle, &output_buffer[0], u32(len(output_buffer)), &bytes_read, io_state.process_output_overlapped)
             if read_success {
@@ -507,34 +549,34 @@ main :: proc() {
             event_filename, _ := windows.wstring_to_utf8(&notifications.file_name[0], int(notifications.file_name_length)/2)
             if strings.has_suffix(event_filename, ".obj") do break
 
-            action := notifications.action
-            strings.builder_reset(&builder)
+                action := notifications.action
+                strings.builder_reset(&builder)
 
-            switch action {
-            case windows.FILE_ACTION_ADDED:
-                if strings.contains(event_filename, "4913") do break
-                // fmt.println("\x1b[33mEVENT: Created\t", event_filename, "\x1b[0m")
-            case windows.FILE_ACTION_REMOVED:
-                if strings.contains(event_filename, "4913") do break
-                // fmt.println("\x1b[33mEVENT: Removed\t", event_filename, "\x1b[0m")
-            case windows.FILE_ACTION_MODIFIED:
-                if strings.has_suffix(event_filename, ".odin") {
-                    // fmt.println("\x1b[33mEVENT: Modified\t", event_filename, "\x1b[0m")
-                    queue_command = true
-                    filename = event_filename
-                } else {
-                    // fmt.println("\x1b[33mEVENT: Modified\t", event_filename, "\x1b[0m")
+                switch action {
+                case windows.FILE_ACTION_ADDED:
+                    if strings.contains(event_filename, "4913") do break
+                        // fmt.println("\x1b[33mEVENT: Created\t", event_filename, "\x1b[0m")
+                case windows.FILE_ACTION_REMOVED:
+                    if strings.contains(event_filename, "4913") do break
+                        // fmt.println("\x1b[33mEVENT: Removed\t", event_filename, "\x1b[0m")
+                case windows.FILE_ACTION_MODIFIED:
+                    if strings.has_suffix(event_filename, ".odin") {
+                        // fmt.println("\x1b[33mEVENT: Modified\t", event_filename, "\x1b[0m")
+                        queue_command = true
+                        filename = event_filename
+                    } else {
+                        // fmt.println("\x1b[33mEVENT: Modified\t", event_filename, "\x1b[0m")
+                    }
+                case windows.FILE_ACTION_RENAMED_OLD_NAME:
+                    file_action_old_name = event_filename
+                case windows.FILE_ACTION_RENAMED_NEW_NAME:
+                    // fmt.println("\x1b[33mEVENT: Renamed\t", file_action_old_name, "to", event_filename, "\x1b[0m")
+                case:
+                    fmt.println("\x1b[33m", event_filename, "- Unknown action", action, "\x1b[0m")
                 }
-            case windows.FILE_ACTION_RENAMED_OLD_NAME:
-                file_action_old_name = event_filename
-            case windows.FILE_ACTION_RENAMED_NEW_NAME:
-                // fmt.println("\x1b[33mEVENT: Renamed\t", file_action_old_name, "to", event_filename, "\x1b[0m")
-            case:
-                fmt.println("\x1b[33m", event_filename, "- Unknown action", action, "\x1b[0m")
-            }
 
-            if notifications.next_entry_offset == 0 do break
-            notifications = (^windows.FILE_NOTIFY_INFORMATION)(uintptr(notifications) + uintptr(notifications.next_entry_offset))
+                if notifications.next_entry_offset == 0 do break
+                    notifications = (^windows.FILE_NOTIFY_INFORMATION)(uintptr(notifications) + uintptr(notifications.next_entry_offset))
         }
 
         if queue_command {
@@ -600,7 +642,7 @@ main :: proc() {
                 strings.write_string(&builder, "-out:\"")
                 strings.write_string(&builder, out_path)
                 strings.write_string(&builder, "\"")
-                
+
                 if arg_info.compilation_target != "" {
                     strings.write_string(&builder, " -target:")
                     strings.write_string(&builder, arg_info.compilation_target)
@@ -621,11 +663,13 @@ main :: proc() {
                 coordinates, carots: [2]int,
                 suggestions : [dynamic]string,
             }
-            error: Error
-            parse_multiline_suggestions : bool = false
-            line_offset := 0
-            row_column_separator := ":"
-            line_code_separator := " | "
+
+            // error: Error
+
+            // parse_multiline_suggestions : bool = false
+            // line_offset := 0
+            // row_column_separator := ":"
+            // line_code_separator := " | "
 
             if !compiled {
                 defer {
@@ -641,7 +685,7 @@ main :: proc() {
                 process_state.startup_information.hStdError = io_state.error_write_handle
 
                 timer = time.tick_now()
-                source_dir := filepath.dir(full_filepath)
+                source_dir = filepath.dir(full_filepath)
                 source_dir_w := windows.utf8_to_wstring(source_dir)
 
                 if !windows.CreateProcessW(nil, command_w, nil, nil, windows.TRUE, process_state.creation_flags, nil, source_dir_w, &process_state.startup_information, &process_state.process_information) {
@@ -751,12 +795,12 @@ main :: proc() {
                     }
                     fmt.printf("%s", cast(string)compilation_output_buffer[:bytes_read])
                 }
-                
+
                 if windows.WaitForSingleObject(process_state.process_information.hProcess, BLOCKING) != PROCESS_COMPLETED {
                     fmt.eprintf("\x1b[31mERROR: WaitForSingleObject (PROCESS_COMPLETED) failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
-                
+
                 if !windows.GetExitCodeProcess(process_state.process_information.hProcess, &exit_code) {
                     fmt.eprintf("\x1b[31mERROR: GetExitCodeProcess failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                 } else if exit_code == 0 {
@@ -768,9 +812,9 @@ main :: proc() {
 
             if compiled && !executing {
                 // Build the full file path by joining the watch directory and event filename.
-                full_filepath := strings.join({arg_info.watch_directory, filename}, "\\")
+                full_filepath = strings.join({arg_info.watch_directory, filename}, "\\")
                 // Extract the source directory from the full file path.
-                source_dir := filepath.dir(full_filepath)
+                source_dir = filepath.dir(full_filepath)
                 // Extract only the base name from the event filename.
                 base_filename := filepath.base(filename)
                 // Remove the last 5 characters (".odin") to get the executable base name.
@@ -781,20 +825,20 @@ main :: proc() {
                 fmt.sbprintf(&builder, "{}\\{}.exe", source_dir, exe_name)
                 name := strings.to_string(builder)
                 process_state.process_name = windows.utf8_to_wstring(name)
-                
+
                 // Create anonymous pipes for stdout and stderr.
                 if windows.CreatePipe(&io_state.output_read_handle, &io_state.output_write_handle, &process_state.security_attributes, 0) {
                     process_state.startup_information.hStdOutput = io_state.output_write_handle
                 } else {
                     fmt.eprintf("ERROR: CreatePipe for stdout failed. Last error: {}\n", windows.GetLastError())
                 }
-                
+
                 if windows.CreatePipe(&io_state.error_read_handle, &io_state.error_write_handle, &process_state.security_attributes, 0) {
                     process_state.startup_information.hStdError = io_state.error_write_handle
                 } else {
                     fmt.eprintf("ERROR: CreatePipe for stderr failed. Last error: {}\n", windows.GetLastError())
                 }
-                
+
                 timer = time.tick_now()
                 if windows.CreateProcessW(nil, process_state.process_name, nil, nil, windows.TRUE, process_state.creation_flags, nil, nil, &process_state.startup_information, &process_state.process_information) {
                     executing = true
@@ -814,5 +858,27 @@ main :: proc() {
         if !windows.ReadDirectoryChangesW(watched_directory_handle, &buffer[0], u32(len(buffer)), true, FSW_WATCHING_EVENTS, nil, overlapped, nil) {
             fmt.eprintf("\x1b[31mERROR: ReadDirectoryChangesW failed!\x1b[0m\n", time.tick_since(timer), exit_code)
         }
+
+        /* Statusline work */
+
+        // buf: [8]u8
+        // now := time.now()
+        // now_time_formatted := time.to_string_mm_dd_yy(now, buf[:])
+        // strings.builder_reset(&builder)
+        // fmt.sbprintf(&builder, "Watching %d  -  %d events processed  -  %s", 1, 2, now_time_formatted)
+        // status := strings.to_string(builder)
+        // strings.builder_reset(&builder)
+        // draw_status_bar(status, console_state)
+
+        // status_info : StatusInfo = {
+        //     file_path   = "./main.odin",
+        //     modified    = false,
+        //     cursor_line = 42,
+        //     cursor_col  = 7,
+        //     total_lines = 424,
+        // }
+        // width, height := get_console_screen_buffer_dimensions(console_state.standard_output_handle)
+        // status := build_status_line(status_info, width)
+        // fmt.printf("\033[%d;1H\033[2K\033[47m\033[30m%s\033[0m", 10, status)
     }
 }

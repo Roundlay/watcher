@@ -1,4 +1,4 @@
-package main
+package schemas
 
 import "core:fmt"
 import "core:strings"
