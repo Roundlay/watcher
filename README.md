@@ -24,3 +24,12 @@ Watch for file modification events in a specific directory and use a specific co
 - - - - -
 
 ![Screenshot (362)](https://github.com/Roundlay/watcher/assets/4133752/beeef4f6-0348-4e74-bef8-b9379c94ab60)
+
+## Rule & Templating
+
+Watcher now supports defining rules via CLI flags or a TOML config file. Rules link file patterns to commands. Example config is in `config/example.watcher.toml`.
+
+CLI example:
+```
+watcher -w ./src -e odin -c "odin build ." --match all
+```
