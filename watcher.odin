@@ -4,6 +4,8 @@ package watcher
 
 A file system watcher written in Odin.
 
+TODO: Should we move away from ReadDirectoryChangesW API as a default for tracking changes in directory? Because it requires a file handle, it locks folder we're watching.
+
 */
 
 import "core:os"
@@ -13,6 +15,8 @@ import "core:strings"
 import "base:runtime"
 import "core:sys/windows"
 import "core:path/filepath"
+
+import "core:os/os2"
 
 ANSI_RESET :: "\x1b[0m"
 ANSI_CLEAR :: "\x1b[2J"
@@ -350,7 +354,16 @@ main :: proc() {
         return info, true
     }
 
-    args := os._alloc_command_line_arguments()
+    command_line_arguments :: proc() -> [] string {
+        result := make([]string, len(runtime.args__))
+        for argument, i in runtime.args__ {
+            result[i] = string(argument)
+        }
+        return result
+    }
+
+    args := command_line_arguments()
+    // args := os._alloc_command_line_arguments()
     defer delete(args)
 
     // Actually parse the arguments and store them in arg_info
@@ -546,7 +559,14 @@ main :: proc() {
         file_action_old_name := ""
 
         for {
-            event_filename, _ := windows.wstring_to_utf8(&notifications.file_name[0], int(notifications.file_name_length)/2)
+            // Convert the file notification wide string into UTF-8 once per entry.
+            notification_wname := windows.wstring(&notifications.file_name[0])
+            event_filename, conversion_err := windows.wstring_to_utf8(notification_wname, int(notifications.file_name_length)/2, context.temp_allocator)
+            if conversion_err != runtime.Allocator_Error.None {
+                fmt.eprintf("\x1b[31mERROR: Failed to decode file notification: {}\x1b[0m\n", conversion_err)
+                break
+            }
+
             if strings.has_suffix(event_filename, ".obj") do break
 
                 action := notifications.action
@@ -653,8 +673,9 @@ main :: proc() {
             }
 
             strings.builder_reset(&builder)
-            command_w : windows.LPWSTR = windows.utf8_to_wstring(command)
+            command_w := windows.utf8_to_wstring(command)
             assert(len(command) > 0, "Generated command should not be empty")
+            assert(command_w != nil, "Failed to convert build command to UTF-16")
 
             // Compilation step.
             Error :: struct {
@@ -687,6 +708,10 @@ main :: proc() {
                 timer = time.tick_now()
                 source_dir = filepath.dir(full_filepath)
                 source_dir_w := windows.utf8_to_wstring(source_dir)
+                if source_dir_w == nil {
+                    fmt.eprintf("\x1b[31mERROR: Failed to convert source directory '{}' to UTF-16\x1b[0m\n", source_dir)
+                    break
+                }
 
                 if !windows.CreateProcessW(nil, command_w, nil, nil, windows.TRUE, process_state.creation_flags, nil, source_dir_w, &process_state.startup_information, &process_state.process_information) {
                     last_error := windows.GetLastError()
