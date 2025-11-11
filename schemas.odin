@@ -1,4 +1,4 @@
-package schemas
+package watcher
 
 import "core:fmt"
 import "core:strings"
