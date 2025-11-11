@@ -14,3 +14,5 @@ test_load_config :: proc(t: ^testing.T) {
     cfg, ok := rule_layer.load_config("./config/example.watcher.toml")
     testing.expect(t, ok && len(cfg.rules) > 0)
 }
+
+main :: proc () {}

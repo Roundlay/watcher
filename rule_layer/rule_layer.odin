@@ -133,3 +133,5 @@ load_config :: proc(file: string) -> (Config, bool) {
     return cfg, true
 }
 
+main :: proc() {
+}
