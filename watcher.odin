@@ -909,6 +909,10 @@ main :: proc() {
                     close_handle(&process_state.process_information.hThread)
                 } else {
                     fmt.eprintf("ERROR: CreateProcessW failed. Last error: {}\n", windows.GetLastError())
+                    close_handle(&io_state.stdout.read_handle)
+                    close_handle(&io_state.stdout.write_handle)
+                    close_handle(&io_state.stderr.read_handle)
+                    close_handle(&io_state.stderr.write_handle)
                 }
             }
             queue_command = false
