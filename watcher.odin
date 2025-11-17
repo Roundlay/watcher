@@ -53,25 +53,110 @@ initialise_process_creation_state :: proc() -> ProcessCreationState {
     return state
 }
 
+PIPE_BUFFER_CAPACITY_BYTES :: uintptr(8192 * 16)
+
+ProcessPipe :: struct {
+    read_handle  : windows.HANDLE,
+    write_handle : windows.HANDLE,
+    overlapped   : windows.OVERLAPPED,
+    buffer       : []u8,
+}
+
 ProcessIOState :: struct {
-    process_output_overlapped : ^windows.OVERLAPPED,
-    output_read_handle  : windows.HANDLE,
-    output_write_handle : windows.HANDLE,
-    error_read_handle   : windows.HANDLE,
-    error_write_handle  : windows.HANDLE,
+    stdout : ProcessPipe,
+    stderr : ProcessPipe,
+}
+
+PipeDrainTarget :: enum {
+    Stdout,
+    Stderr,
 }
 
 // Helper function to initialize the process IO state.
 initialise_process_io_state :: proc() -> ProcessIOState {
     state : ProcessIOState
-    state.process_output_overlapped = new(windows.OVERLAPPED)
-    state.process_output_overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
-    
-    state.output_read_handle  = windows.INVALID_HANDLE_VALUE
-    state.output_write_handle = windows.INVALID_HANDLE_VALUE
-    state.error_read_handle   = windows.INVALID_HANDLE_VALUE
-    state.error_write_handle  = windows.INVALID_HANDLE_VALUE
+    init_pipe :: proc() -> ProcessPipe {
+        pipe : ProcessPipe
+        pipe.read_handle  = windows.INVALID_HANDLE_VALUE
+        pipe.write_handle = windows.INVALID_HANDLE_VALUE
+        pipe.overlapped   = windows.OVERLAPPED{}
+        pipe.overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
+        pipe.buffer = make([]u8, int(PIPE_BUFFER_CAPACITY_BYTES))
+        return pipe
+    }
+
+    state.stdout = init_pipe()
+    state.stderr = init_pipe()
     return state
+}
+
+destroy_process_io_state :: proc(state: ^ProcessIOState) {
+    destroy_pipe :: proc(pipe: ^ProcessPipe) {
+        if pipe.buffer != nil {
+            delete(pipe.buffer)
+            pipe.buffer = nil
+        }
+        if pipe.overlapped.hEvent != windows.INVALID_HANDLE_VALUE {
+            windows.CloseHandle(pipe.overlapped.hEvent)
+            pipe.overlapped.hEvent = windows.INVALID_HANDLE_VALUE
+        }
+        if pipe.read_handle != windows.INVALID_HANDLE_VALUE {
+            windows.CloseHandle(pipe.read_handle)
+            pipe.read_handle = windows.INVALID_HANDLE_VALUE
+        }
+        if pipe.write_handle != windows.INVALID_HANDLE_VALUE {
+            windows.CloseHandle(pipe.write_handle)
+            pipe.write_handle = windows.INVALID_HANDLE_VALUE
+        }
+    }
+
+    destroy_pipe(&state.stdout)
+    destroy_pipe(&state.stderr)
+}
+
+drain_process_pipe :: proc(pipe: ^ProcessPipe, target: PipeDrainTarget) {
+    if pipe.read_handle == windows.INVALID_HANDLE_VALUE || len(pipe.buffer) == 0 {
+        return
+    }
+
+    target_name := "stdout"
+    if target == .Stderr {
+        target_name = "stderr"
+    }
+
+    bytes_read := windows.DWORD(0)
+    if pipe.overlapped.hEvent != windows.INVALID_HANDLE_VALUE {
+        windows.ResetEvent(pipe.overlapped.hEvent)
+    }
+
+    read_success := windows.ReadFile(pipe.read_handle, &pipe.buffer[0], u32(len(pipe.buffer)), &bytes_read, &pipe.overlapped)
+    if read_success {
+        if bytes_read > 0 {
+            if target == .Stdout {
+                fmt.printf("%s", pipe.buffer[:bytes_read])
+            } else {
+                fmt.eprintf("%s", pipe.buffer[:bytes_read])
+            }
+        }
+        return
+    }
+
+    last_error := windows.GetLastError()
+    if last_error == windows.ERROR_IO_PENDING {
+        if windows.GetOverlappedResult(pipe.read_handle, &pipe.overlapped, &bytes_read, windows.TRUE) {
+            if bytes_read > 0 {
+                if target == .Stdout {
+                    fmt.printf("%s", pipe.buffer[:bytes_read])
+                } else {
+                    fmt.eprintf("%s", pipe.buffer[:bytes_read])
+                }
+            }
+        } else {
+            fmt.eprintf("\x1b[31mERROR: GetOverlappedResult failed for pipe {}: {}\x1b[0m\n", target_name, windows.GetLastError())
+        }
+    } else if last_error != windows.ERROR_BROKEN_PIPE {
+        fmt.eprintf("\x1b[31mERROR: ReadFile failed for pipe {}: {}\x1b[0m\n", target_name, last_error)
+    }
 }
 
 ConsoleState :: struct {
@@ -423,6 +508,7 @@ main :: proc() {
 
     process_state := initialise_process_creation_state()
     io_state      := initialise_process_io_state()
+    defer destroy_process_io_state(&io_state)
 
     for {
 
@@ -444,67 +530,21 @@ main :: proc() {
             // terminate and clean up the process if it is still running.
             if process_state.process_information.hProcess != windows.INVALID_HANDLE_VALUE {
                 windows.TerminateProcess(process_state.process_information.hProcess, 1)
-                windows.CloseHandle(process_state.process_information.hProcess)
-                process_state.process_information.hProcess = windows.INVALID_HANDLE_VALUE
+                close_handle(&process_state.process_information.hProcess)
             }
+            close_handle(&process_state.process_information.hThread)
+            close_handle(&io_state.stdout.read_handle)
+            close_handle(&io_state.stdout.write_handle)
+            close_handle(&io_state.stderr.read_handle)
+            close_handle(&io_state.stderr.write_handle)
 
             break
         }
 
         if executing {
-            bytes_read := windows.DWORD(0)
+            drain_process_pipe(&io_state.stdout, .Stdout)
+            drain_process_pipe(&io_state.stderr, .Stderr)
 
-            output_buffer := make([]u8, 8192 * 16)
-            defer delete(output_buffer)
-
-            // Reset the event in the overlapped structure.
-            windows.ResetEvent(io_state.process_output_overlapped.hEvent)
-
-            // fmt.printf("\x1b[36mDEBUG: Polling output...\x1b[0m\n")
-
-            // Read stdout using the overlapped structure.
-            read_success := windows.ReadFile(io_state.output_read_handle, &output_buffer[0], u32(len(output_buffer)), &bytes_read, io_state.process_output_overlapped)
-            if read_success {
-                // Output whatever we generate to standard out.
-                fmt.printf("%s", output_buffer[:bytes_read])
-            } else {
-                last_error := windows.GetLastError()
-                if last_error == windows.ERROR_IO_PENDING {
-                    fmt.printf("\x1b[36mDEBUG: stdout read pending, waiting for result...\x1b[0m\n")
-                    if windows.GetOverlappedResult(io_state.output_read_handle, io_state.process_output_overlapped, &bytes_read, windows.TRUE) {
-                        fmt.printf("STDOUT: %s", output_buffer[:bytes_read])
-                    } else {
-                        fmt.eprintf("\x1b[31mERROR: GetOverlappedResult (stdout) failed: %d\x1b[0m\n", windows.GetLastError())
-                    }
-                } else if last_error != windows.ERROR_BROKEN_PIPE {
-                    fmt.eprintf("\x1b[31mERROR: ReadFile (stdout) failed: %d\x1b[0m\n", last_error)
-                }
-            }
-
-            // Read stderr using a new overlapped structure.
-            stderr_overlapped := new(windows.OVERLAPPED)
-            stderr_overlapped.hEvent = windows.CreateEventW(nil, windows.TRUE, windows.FALSE, nil)
-            defer free(stderr_overlapped)
-            defer windows.CloseHandle(stderr_overlapped.hEvent)
-
-            read_success = windows.ReadFile(io_state.error_read_handle, &output_buffer[0], u32(len(output_buffer)), &bytes_read, stderr_overlapped)
-            if read_success {
-                fmt.eprintf("STDERR: %s", output_buffer[:bytes_read])
-            } else {
-                last_error := windows.GetLastError()
-                if last_error == windows.ERROR_IO_PENDING {
-                    fmt.printf("\x1b[36mDEBUG: stderr read pending, waiting for result...\x1b[0m\n")
-                    if windows.GetOverlappedResult(io_state.error_read_handle, stderr_overlapped, &bytes_read, windows.TRUE) {
-                        fmt.eprintf("STDERR: %s", output_buffer[:bytes_read])
-                    } else {
-                        fmt.eprintf("\x1b[31mERROR: GetOverlappedResult (stderr) failed: %d\x1b[0m\n", windows.GetLastError())
-                    }
-                } else if last_error != windows.ERROR_BROKEN_PIPE {
-                    fmt.eprintf("\x1b[31mERROR: ReadFile (stderr) failed: %d\x1b[0m\n", last_error)
-                }
-            }
-
-            // Check process status.
             status_of_running_process := windows.WaitForSingleObject(process_state.process_information.hProcess, 0)
             if status_of_running_process == PROCESS_COMPLETED {
                 if windows.GetExitCodeProcess(process_state.process_information.hProcess, &exit_code) {
@@ -516,15 +556,11 @@ main :: proc() {
                 } else {
                     fmt.eprintf("\n\x1b[31mERROR: Failed to get exit code for process: %d\x1b[0m\n", windows.GetLastError())
                 }
-                // Cleanup.
-                windows.CloseHandle(process_state.process_information.hProcess)
-                windows.CloseHandle(process_state.process_information.hThread)
-                windows.CloseHandle(io_state.output_read_handle)
-                windows.CloseHandle(io_state.error_read_handle)
-                process_state.process_information.hProcess = windows.INVALID_HANDLE_VALUE
-                process_state.process_information.hThread = windows.INVALID_HANDLE_VALUE
-                io_state.output_read_handle = windows.INVALID_HANDLE_VALUE
-                io_state.error_read_handle = windows.INVALID_HANDLE_VALUE
+
+                close_handle(&process_state.process_information.hProcess)
+                close_handle(&process_state.process_information.hThread)
+                close_handle(&io_state.stdout.read_handle)
+                close_handle(&io_state.stderr.read_handle)
                 executing = false
             }
 
@@ -602,8 +638,7 @@ main :: proc() {
         if queue_command {
             if process_state.process_information.hProcess != windows.INVALID_HANDLE_VALUE {
                 windows.TerminateProcess(process_state.process_information.hProcess, 1)
-                windows.CloseHandle(process_state.process_information.hProcess)
-                process_state.process_information.hProcess = windows.INVALID_HANDLE_VALUE
+                close_handle(&process_state.process_information.hProcess)
             }
 
             compiled, executing = false, false
@@ -694,16 +729,16 @@ main :: proc() {
 
             if !compiled {
                 defer {
-                    windows.CloseHandle(io_state.error_write_handle)
-                    windows.CloseHandle(io_state.error_read_handle)
-                    windows.CloseHandle(process_state.process_information.hProcess)
+                    close_handle(&io_state.stderr.write_handle)
+                    close_handle(&io_state.stderr.read_handle)
+                    close_handle(&process_state.process_information.hProcess)
                 }
 
-                if !windows.CreatePipe(&io_state.error_read_handle, &io_state.error_write_handle, &process_state.security_attributes, 0) {
+                if !windows.CreatePipe(&io_state.stderr.read_handle, &io_state.stderr.write_handle, &process_state.security_attributes, 0) {
                     fmt.eprintf("\x1b[31mERROR: CreatePipe failed. Last error: {}\x1b[0m\n", windows.GetLastError())
                     break
                 }
-                process_state.startup_information.hStdError = io_state.error_write_handle
+                process_state.startup_information.hStdError = io_state.stderr.write_handle
 
                 timer = time.tick_now()
                 source_dir = filepath.dir(full_filepath)
@@ -719,8 +754,8 @@ main :: proc() {
                     break
                 }
                 // The process handle is stored inside process_state.process_information.
-                windows.CloseHandle(process_state.process_information.hThread)
-                windows.CloseHandle(io_state.error_write_handle)
+                close_handle(&process_state.process_information.hThread)
+                close_handle(&io_state.stderr.write_handle)
 
                 // for {
                 //     bytes_read: windows.DWORD
@@ -815,7 +850,7 @@ main :: proc() {
                 // Instead of custom formatting, simply dump the raw output unformatted.
                 for {
                     bytes_read: windows.DWORD
-                    if !windows.ReadFile(io_state.error_read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
+                    if !windows.ReadFile(io_state.stderr.read_handle, &compilation_output_buffer[0], u32(len(compilation_output_buffer)), &bytes_read, nil) || bytes_read == 0 {
                         break
                     }
                     fmt.printf("%s", cast(string)compilation_output_buffer[:bytes_read])
@@ -852,14 +887,14 @@ main :: proc() {
                 process_state.process_name = windows.utf8_to_wstring(name)
 
                 // Create anonymous pipes for stdout and stderr.
-                if windows.CreatePipe(&io_state.output_read_handle, &io_state.output_write_handle, &process_state.security_attributes, 0) {
-                    process_state.startup_information.hStdOutput = io_state.output_write_handle
+                if windows.CreatePipe(&io_state.stdout.read_handle, &io_state.stdout.write_handle, &process_state.security_attributes, 0) {
+                    process_state.startup_information.hStdOutput = io_state.stdout.write_handle
                 } else {
                     fmt.eprintf("ERROR: CreatePipe for stdout failed. Last error: {}\n", windows.GetLastError())
                 }
 
-                if windows.CreatePipe(&io_state.error_read_handle, &io_state.error_write_handle, &process_state.security_attributes, 0) {
-                    process_state.startup_information.hStdError = io_state.error_write_handle
+                if windows.CreatePipe(&io_state.stderr.read_handle, &io_state.stderr.write_handle, &process_state.security_attributes, 0) {
+                    process_state.startup_information.hStdError = io_state.stderr.write_handle
                 } else {
                     fmt.eprintf("ERROR: CreatePipe for stderr failed. Last error: {}\n", windows.GetLastError())
                 }
@@ -869,9 +904,9 @@ main :: proc() {
                     executing = true
                     fmt.printf("\x1b[34mINFO: Running process...\x1b[0m\n")
                     // Since the child inherits the write ends, close them in the parent.
-                    windows.CloseHandle(io_state.output_write_handle)
-                    windows.CloseHandle(io_state.error_write_handle)
-                    windows.CloseHandle(process_state.process_information.hThread)
+                    close_handle(&io_state.stdout.write_handle)
+                    close_handle(&io_state.stderr.write_handle)
+                    close_handle(&process_state.process_information.hThread)
                 } else {
                     fmt.eprintf("ERROR: CreateProcessW failed. Last error: {}\n", windows.GetLastError())
                 }
