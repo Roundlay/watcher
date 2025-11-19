@@ -6,6 +6,8 @@ A file system watcher written in Odin.
 
 TODO: Should we move away from ReadDirectoryChangesW API as a default for tracking changes in directory? Because it requires a file handle, it locks folder we're watching.
 
+TODO: Would any parts of the code benefit from complete refactors? If not, what parts of the code could be improved in terms of performance and/or a reduction in instruction count by adhering to the data-oriented design principles outlined in <dod>?
+
 */
 
 import "core:os"
