@@ -1,6 +1,6 @@
-### 𝐖𝐚𝐭𝐜𝐡𝐞𝐫: A simple file-system watcher and auto-compiler for the Odin programming language.
+### A simple file-system watcher
 
-𝐖𝐚𝐭𝐜𝐡𝐞𝐫 implements a basic Win32 file-system watcher that looks for and responds to modifications to `.odin` files in a specific directory. When such an event is detected 𝐖𝐚𝐭𝐜𝐡𝐞𝐫 attempts to compile and execute the modified file. If the compilation or execution process fails, the program emits some nicely formatted error messages from the compiler. In principle, the tool can easily be extended to watch for changes to other event or file types.
+Watcher implements a basic Win32 file-system watcher that looks for and responds to modifications to file-system events.
 
 **Command-line Launch Arguments**
 
@@ -20,16 +20,3 @@ Watch for file modification events in a specific directory:
 Watch for file modification events in a specific directory and use a specific compilation target:
 
 - `watcher -w:C:\Users\User\Projects\watch -t:js_wasm32`
-
-- - - - -
-
-![Screenshot (362)](https://github.com/Roundlay/watcher/assets/4133752/beeef4f6-0348-4e74-bef8-b9379c94ab60)
-
-## Rule & Templating
-
-Watcher now supports defining rules via CLI flags or a TOML config file. Rules link file patterns to commands. Example config is in `config/example.watcher.toml`.
-
-CLI example:
-```
-watcher -w ./src -e odin -c "odin build ." --match all
-```
